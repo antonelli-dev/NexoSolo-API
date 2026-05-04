@@ -15,6 +15,7 @@ import { SubscriptionModule } from './subscription/subscription.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SmartInvoicingModule } from './smart-invoicing/smart-invoicing.module';
+import { StripeConnectModule } from './stripe-connect/stripe-connect.module';
 import { GamificationModule } from './gamification/gamification.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
 import { AutomationModule } from './automation/automation.module';
@@ -66,6 +67,7 @@ const ratePerMin = Number(process.env.RATE_LIMIT_PER_MIN ?? 60);
     AnalyticsModule,
     NotificationsModule,
     SmartInvoicingModule,
+    StripeConnectModule,
     GamificationModule,
     MarketplaceModule,
     AutomationModule,

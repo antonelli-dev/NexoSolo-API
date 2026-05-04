@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -347,12 +348,37 @@ ${downloadUrlHtml}
     });
   }
 
-  async recordPayment(userId: string, invoiceId: string, dto: CreatePaymentDto) {
+  async recordPayment(
+    userId: string,
+    invoiceId: string,
+    dto: CreatePaymentDto,
+    idempotencyKeyHeader?: string,
+  ) {
+    const fromHeader = idempotencyKeyHeader?.trim();
+    const fromBody = dto.idempotencyKey?.trim();
+    const idempotencyKey = (fromHeader || fromBody) || undefined;
+    if (idempotencyKey && idempotencyKey.length > 255) {
+      throw new BadRequestException({ code: 'IDEMPOTENCY_KEY_TOO_LONG' });
+    }
+
     const inv = await this.prisma.freelanceInvoice.findFirst({
       where: { id: invoiceId, project: { userId } },
       include: { payments: true },
     });
     if (!inv) throw new NotFoundException({ code: 'INVOICE_NOT_FOUND' });
+
+    if (idempotencyKey) {
+      const existing = await this.prisma.invoicePayment.findFirst({
+        where: { invoiceId, idempotencyKey },
+      });
+      if (existing) {
+        const existingCents = Math.round(Number(existing.amount) * 100);
+        if (existingCents !== dto.amountCents) {
+          throw new ConflictException({ code: 'IDEMPOTENCY_KEY_MISMATCH' });
+        }
+        return existing;
+      }
+    }
 
     const paid = inv.payments.reduce((s, p) => s + Number(p.amount), 0);
     const newTotal = paid + (dto.amountCents / 100);
@@ -363,10 +389,10 @@ ${downloadUrlHtml}
         invoiceId,
         amount: dto.amountCents / 100,
         note: dto.note,
-      } as any,
+        idempotencyKey: idempotencyKey ?? null,
+      },
     });
 
-    // Update invoice status if fully paid
     if (balance <= 0) {
       await this.prisma.freelanceInvoice.update({
         where: { id: invoiceId },

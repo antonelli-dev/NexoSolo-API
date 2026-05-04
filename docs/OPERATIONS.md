@@ -8,6 +8,7 @@ This document covers security configuration, observability, backups, and databas
 - **Rate limiting:** `@nestjs/throttler` applies a global limit (`RATE_LIMIT_PER_MIN`, default 120/min). `/health` is excluded so load balancers and probes are not blocked.
 - **Debug impersonation:** `X-Debug-User-Id` is honored only when `ALLOW_DEBUG_USER_IMPERSONATION=true` **and** `NODE_ENV` is not `production`. Keep the flag `false` in prod and rely on real JWTs.
 - **Helmet:** Standard security headers are applied via `helmet`.
+- **Manual invoice payments:** `POST /v1/freelance/invoices/:id/payments` accepts optional **`Idempotency-Key`** header or body **`idempotencyKey`** (header wins). Same key + same invoice + same `amountCents` returns the existing row; same key with a different amount returns **409** (`IDEMPOTENCY_KEY_MISMATCH`).
 
 ## Structured logs
 
@@ -21,6 +22,7 @@ This document covers security configuration, observability, backups, and databas
 
 - **App:** `react-native-purchases` + `Purchases.logIn(<supabase user id>)` so `app_user_id` in RevenueCat matches `profiles.id`.
 - **Webhook:** Function `supabase/functions/revenuecat-webhook`. Set the same **Authorization** secret in RevenueCat (Integrations → Webhooks) and in Supabase secrets as `REVENUECAT_WEBHOOK_AUTH`.
+- **Nest:** `POST /webhooks/revenuecat` records each `payload.id` once in `processed_revenuecat_webhook_events`; duplicates return `{ duplicate: true }` without re-running handlers (cleaner logs on retries).
 - Optional env `REVENUECAT_ENTITLEMENT_ID` (default `premium`) must match the entitlement identifier in the RevenueCat dashboard and `EXPO_PUBLIC_REVENUECAT_ENTITLEMENT_ID` in the app.
 - Native IAP requires a **development or production build** (not Expo Go). Use `eas build` / `expo prebuild` per `react-native-purchases` docs.
 
@@ -29,7 +31,8 @@ This document covers security configuration, observability, backups, and databas
 - **Nest:** `POST /v1/webhooks/stripe` verifies the payload with `constructEvent` using **`STRIPE_WEBHOOK_SECRET`** (Dashboard → Webhooks → signing secret for **this exact URL**). Raw body must be enabled (`rawBody: true`) or signature verification will fail.
 - **Idempotency:** Each Stripe event id (`evt_…`) is stored once in `processed_stripe_webhook_events`. Retries and duplicate deliveries do not mark an invoice paid twice. Checkout Session creation uses Stripe’s **`idempotencyKey`** (`checkout_inv_<invoiceId>`) so network retries do not spawn extra sessions.
 - **Trust:** After verifying the signature, the handler checks `payment_status === paid` when present, and that **`amount_total`** / **currency** match the invoice before updating status (logs and skips on mismatch).
-- **Connected accounts / per-user API keys:** One global `STRIPE_WEBHOOK_SECRET` only matches events signed by **one** Stripe account. If freelancers use **their own** Stripe keys for Checkout, either use **Stripe Connect** (platform receives all events with one secret) or register **separate webhook endpoints** per account (not what this single route models today).
+- **Stripe Connect (recommended path):** Enable Connect on the platform account. Env: **`STRIPE_SECRET_KEY`** (platform), **`STRIPE_WEBHOOK_SECRET`**, **`STRIPE_CONNECT_DEFAULT_COUNTRY`** (ISO 2-letter, e.g. `ES`), optional **`STRIPE_CONNECT_APPLICATION_FEE_BPS`** (basis points on card payments). Users onboard via **`POST /v1/stripe-connect/onboarding-link`** (JWT) with `refreshUrl` / `returnUrl`; status via **`GET /v1/stripe-connect/status`**. Checkout uses **direct charges**: platform creates sessions with request option **`stripeAccount`** and optional **`payment_intent_data.application_fee_amount`**. Webhook **`account.updated`** updates `profiles.stripe_connect_*` flags; enable **events from connected accounts** in the Dashboard for that endpoint.
+- **Legacy Checkout:** If a saved payment method includes **`stripeSecretKey`** and Connect is not ready, the adapter still supports creating sessions with that secret (migration path). Prefer Connect so user secrets are not stored.
 - Legacy **Supabase Edge** function `supabase/functions/stripe-webhook` may remain for older flows; prefer the Nest route for CRM invoice checkout. Still verify with `constructEvent` — never trust raw JSON.
 
 ## Edge Functions (AI)

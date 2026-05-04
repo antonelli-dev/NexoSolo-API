@@ -14,6 +14,7 @@ import type { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { RevenueCatWebhookDto, RevenueCatEventType, SubscriptionTier } from './revenuecat.dto';
 import { AppLogger } from '../common/logger.service';
+import { Prisma } from '@prisma/client';
 
 @ApiTags('webhooks')
 @Controller('webhooks/revenuecat')
@@ -52,6 +53,23 @@ export class RevenueCatWebhookController {
     }
 
     try {
+      try {
+        await this.prisma.processedRevenueCatWebhookEvent.create({
+          data: {
+            revenuecatEventId: payload.id,
+            eventType: String(payload.event_type),
+          },
+        });
+      } catch (err) {
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === 'P2002'
+        ) {
+          return { status: 'processed', duplicate: true };
+        }
+        throw err;
+      }
+
       await this.processWebhookEvent(payload);
       return { status: 'processed' };
     } catch (error) {

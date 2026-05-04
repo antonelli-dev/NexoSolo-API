@@ -191,7 +191,9 @@ class FreelancerStrategy implements RoleStrategy {
       'POST /v1/freelance/invoices',
       'GET /v1/analytics/revenue',
       'GET /v1/gamification/streak',
-      'GET /v1/smart-invoicing/payment-methods'
+      'GET /v1/smart-invoicing/payment-methods',
+      'GET /v1/stripe-connect/status',
+      'POST /v1/stripe-connect/onboarding-link',
     ];
   }
 

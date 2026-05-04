@@ -78,3 +78,11 @@ export interface SmartReminderShape {
   sent: boolean;
   sentAt?: Date;
 }
+
+/** Optional per-provider flags for Checkout (Connect, etc.). */
+export type PaymentLinkOptions = Readonly<{
+  stripe?: Readonly<{
+    connectedAccountId: string;
+    applicationFeeAmountCents?: number;
+  }>;
+}>;

@@ -21,12 +21,15 @@ import {
 } from './payment-mapper';
 import type {
   InvoiceForCheckout,
+  PaymentLinkOptions,
   PaymentLinkShape,
+  PaymentMethodForProvider,
   SmartInvoice,
   SmartReminderShape,
   UserPaymentMethodResponse,
 } from './payment-models';
 import type { PaymentProviderPort } from './ports/payment-provider.port';
+import { StripeConnectFeePolicy } from '../stripe-connect/stripe-connect-fee.policy';
 
 @Injectable()
 export class SmartInvoicingService {
@@ -40,6 +43,7 @@ export class SmartInvoicingService {
     private readonly paypalAdapter: PayPalAdapter,
     private readonly wiseAdapter: WiseAdapter,
     private readonly cryptoAdapter: CryptoAdapter,
+    private readonly stripeConnectFeePolicy: StripeConnectFeePolicy,
   ) {
     this.logger = new AppLogger(config);
     this.paymentProviders.set(this.stripeAdapter.getProviderId(), this.stripeAdapter);
@@ -108,8 +112,20 @@ export class SmartInvoicingService {
       throw new Error('Invoice not found');
     }
 
+    const profile = await this.prisma.profile.findUnique({
+      where: { id: userId },
+      select: {
+        stripeConnectAccountId: true,
+        stripeConnectChargesEnabled: true,
+        stripeConnectDetailsSubmitted: true,
+      },
+    });
+
     const checkout = this.invoiceToCheckout(invoice);
     const links: PaymentLinkShape[] = [];
+    let stripeEmitted = false;
+    const amountCents = Math.round(Number(invoice.amount) * 100);
+    const connectOptions = this.buildStripeConnectLinkOptions(profile, amountCents);
 
     for (const row of rows) {
       if (row.type === 'bank') {
@@ -131,6 +147,29 @@ export class SmartInvoicingService {
         continue;
       }
 
+      if (row.type === 'stripe') {
+        const resolved = this.resolveStripeCheckoutOptions(methodPayload, connectOptions);
+        if (resolved === 'skip') {
+          continue;
+        }
+        const linkType = this.linkTypeForProviderRow(row.type);
+        links.push({
+          id: `${row.type}_${invoiceId}`,
+          type: linkType,
+          url: await this.stripeAdapter.generatePaymentLink(
+            checkout,
+            methodPayload,
+            resolved,
+          ),
+          label: `Pay with ${row.name}`,
+          icon: this.iconForType(row.type),
+          fee: Number(row.feePercentage),
+          processingTime: row.processingTime,
+        });
+        stripeEmitted = true;
+        continue;
+      }
+
       const linkType = this.linkTypeForProviderRow(row.type);
       links.push({
         id: `${row.type}_${invoiceId}`,
@@ -143,7 +182,75 @@ export class SmartInvoicingService {
       });
     }
 
+    if (
+      !stripeEmitted &&
+      connectOptions !== null &&
+      connectOptions.stripe !== undefined
+    ) {
+      const stub = toPaymentMethodForProvider('stripe', null);
+      if (stub) {
+        links.push({
+          id: `stripe_connect_${invoiceId}`,
+          type: 'stripe',
+          url: await this.stripeAdapter.generatePaymentLink(checkout, stub, connectOptions),
+          label: 'Pay with card (Stripe)',
+          icon: this.iconForType('stripe'),
+          fee: 0,
+          processingTime: 'Instant',
+        });
+      }
+    }
+
     return links;
+  }
+
+  private buildStripeConnectLinkOptions(
+    profile: {
+      stripeConnectAccountId: string | null;
+      stripeConnectChargesEnabled: boolean;
+      stripeConnectDetailsSubmitted: boolean;
+    } | null,
+    amountCents: number,
+  ): PaymentLinkOptions | null {
+    if (!profile) {
+      return null;
+    }
+    const accountId = profile.stripeConnectAccountId;
+    if (
+      typeof accountId !== 'string' ||
+      !accountId.startsWith('acct_') ||
+      !profile.stripeConnectChargesEnabled ||
+      !profile.stripeConnectDetailsSubmitted
+    ) {
+      return null;
+    }
+    const fee =
+      this.stripeConnectFeePolicy.applicationFeeCentsForPayment(amountCents);
+    return {
+      stripe: {
+        connectedAccountId: accountId,
+        ...(fee !== undefined ? { applicationFeeAmountCents: fee } : {}),
+      },
+    };
+  }
+
+  private resolveStripeCheckoutOptions(
+    methodPayload: PaymentMethodForProvider,
+    connect: PaymentLinkOptions | null,
+  ): PaymentLinkOptions | undefined | 'skip' {
+    const legacy = this.stripeLegacySecretConfigured(methodPayload.accountDetails);
+    if (connect !== null) {
+      return connect;
+    }
+    if (legacy) {
+      return undefined;
+    }
+    return 'skip';
+  }
+
+  private stripeLegacySecretConfigured(details: Record<string, string>): boolean {
+    const k = details['stripeSecretKey'];
+    return typeof k === 'string' && k.length > 0;
   }
 
   async createSmartReminders(invoiceId: string): Promise<SmartReminderShape[]> {

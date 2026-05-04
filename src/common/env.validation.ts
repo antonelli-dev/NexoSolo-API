@@ -65,6 +65,16 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   SWAGGER?: string;
+
+  /** ISO 3166-1 alpha-2 country for new Stripe Express accounts (e.g. ES, DE, US). */
+  @IsString()
+  @IsOptional()
+  STRIPE_CONNECT_DEFAULT_COUNTRY?: string;
+
+  /** Optional platform fee on Connect card payments, basis points (100 = 1%). */
+  @IsString()
+  @IsOptional()
+  STRIPE_CONNECT_APPLICATION_FEE_BPS?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

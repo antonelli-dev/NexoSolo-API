@@ -42,6 +42,12 @@ model Profile {
   invoiceBrandAccentHex  String  @default("#6366f1") @map("invoice_brand_accent_hex") @db.VarChar(7)
   invoiceBrandFooter     String? @map("invoice_brand_footer") @db.Text
 
+  /// Stripe Connect Express account (acct_…); Checkout uses platform key + stripeAccount option.
+  stripeConnectAccountId         String? @map("stripe_connect_account_id") @db.VarChar(32)
+  stripeConnectChargesEnabled    Boolean @default(false) @map("stripe_connect_charges_enabled")
+  stripeConnectPayoutsEnabled    Boolean @default(false) @map("stripe_connect_payouts_enabled")
+  stripeConnectDetailsSubmitted  Boolean @default(false) @map("stripe_connect_details_submitted")
+
   userAttachments UserAttachment[]
   budgetExpenses  PersonalBudgetExpense[]
   paymentMethods  UserPaymentMethod[]
@@ -186,6 +192,16 @@ model ProcessedStripeWebhookEvent {
   @@map("processed_stripe_webhook_events")
 }
 
+/// Dedupes RevenueCat webhook retries (same payload.id).
+model ProcessedRevenueCatWebhookEvent {
+  id                String   @id @default(uuid()) @db.Uuid
+  revenuecatEventId String   @unique @map("revenuecat_event_id") @db.VarChar(255)
+  eventType         String   @map("event_type") @db.VarChar(64)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("processed_revenuecat_webhook_events")
+}
+
 /// File metadata for objects stored in Supabase Storage (`user-files` bucket).
 model UserAttachment {
   id         String   @id @default(uuid()) @db.Uuid
@@ -212,11 +228,14 @@ model InvoicePayment {
   invoiceId String @map("invoice_id") @db.Uuid
   amount    Decimal  @db.Decimal(12, 2)
   note      String?
+  /// Same key + invoice → same row (header Idempotency-Key or body idempotencyKey).
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(255)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   invoice FreelanceInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
   @@index([invoiceId])
+  @@unique([invoiceId, idempotencyKey])
   @@map("invoice_payments")
 }
 

@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Header,
+  Headers,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -162,8 +163,9 @@ export class FreelanceController {
     @Req() req: Authed,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreatePaymentDto,
+    @Headers('idempotency-key') idempotencyKeyHeader?: string,
   ) {
-    return this.freelance.recordPayment(req.user.sub, id, dto);
+    return this.freelance.recordPayment(req.user.sub, id, dto, idempotencyKeyHeader);
   }
 
   @Get('quotes')

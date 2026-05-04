@@ -10,4 +10,10 @@ export class CreatePaymentDto {
   @IsString()
   @MaxLength(500)
   note?: string;
+
+  /** Optional; also accepts HTTP header `Idempotency-Key` (header wins if both sent). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  idempotencyKey?: string;
 }

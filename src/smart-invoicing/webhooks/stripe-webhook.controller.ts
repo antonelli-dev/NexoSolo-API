@@ -4,6 +4,8 @@ import { StripeAdapter, StripeWebhookEvent } from '../adapters/stripe.adapter';
 import { SmartInvoicingService } from '../smart-invoicing.service';
 import { AppLogger } from '../../common/logger.service';
 import { ConfigService } from '@nestjs/config';
+import { parseStripeConnectAccountFromWebhook } from '../../stripe-connect/stripe-connect-account.parse';
+import { StripeConnectAccountSyncService } from '../../stripe-connect/stripe-connect-account-sync.service';
 
 interface RequestWithRawBody extends Request {
   rawBody?: Buffer;
@@ -16,6 +18,7 @@ export class StripeWebhookController {
   constructor(
     private readonly stripeAdapter: StripeAdapter,
     private readonly smartInvoicingService: SmartInvoicingService,
+    private readonly stripeConnectAccountSync: StripeConnectAccountSyncService,
     private readonly config: ConfigService,
   ) {
     this.logger = new AppLogger(config);
@@ -53,7 +56,14 @@ export class StripeWebhookController {
   }
 
   private async processStripeEvent(event: StripeWebhookEvent): Promise<void> {
-    // Handle the checkout.session.completed event
+    if (event.type === 'account.updated') {
+      const snapshot = parseStripeConnectAccountFromWebhook(event.data.object);
+      if (snapshot !== null) {
+        await this.stripeConnectAccountSync.applySnapshot(snapshot);
+      }
+      return;
+    }
+
     if (event.type === 'checkout.session.completed') {
       // We know it's a Checkout Session based on the event type
       const session = event.data.object;

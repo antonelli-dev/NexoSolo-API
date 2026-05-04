@@ -72,6 +72,18 @@ export class PaymentAccountDetailsDto {
   @IsOptional()
   @IsString()
   cryptoApiKey?: string;
+
+  /** HTTPS link shown to payers (any provider); overrides generic stubs when set. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  externalPayUrl?: string;
+
+  /** PayPal.Me handle (no @); builds https://paypal.me/{handle} */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  paypalMeHandle?: string;
 }
 
 export class CreateUserPaymentMethodDto {
