@@ -26,8 +26,11 @@ This document covers security configuration, observability, backups, and databas
 
 ## Stripe webhooks (optional — web-only billing)
 
-- Function: `supabase/functions/stripe-webhook`. Use only if you charge by card on the web; **not** a substitute for App Store / Play Billing for digital goods in the mobile apps.
-- **Always** verify with `Stripe.webhooks.constructEvent` and `STRIPE_WEBHOOK_SECRET`. Do not parse raw JSON in production.
+- **Nest:** `POST /v1/webhooks/stripe` verifies the payload with `constructEvent` using **`STRIPE_WEBHOOK_SECRET`** (Dashboard → Webhooks → signing secret for **this exact URL**). Raw body must be enabled (`rawBody: true`) or signature verification will fail.
+- **Idempotency:** Each Stripe event id (`evt_…`) is stored once in `processed_stripe_webhook_events`. Retries and duplicate deliveries do not mark an invoice paid twice. Checkout Session creation uses Stripe’s **`idempotencyKey`** (`checkout_inv_<invoiceId>`) so network retries do not spawn extra sessions.
+- **Trust:** After verifying the signature, the handler checks `payment_status === paid` when present, and that **`amount_total`** / **currency** match the invoice before updating status (logs and skips on mismatch).
+- **Connected accounts / per-user API keys:** One global `STRIPE_WEBHOOK_SECRET` only matches events signed by **one** Stripe account. If freelancers use **their own** Stripe keys for Checkout, either use **Stripe Connect** (platform receives all events with one secret) or register **separate webhook endpoints** per account (not what this single route models today).
+- Legacy **Supabase Edge** function `supabase/functions/stripe-webhook` may remain for older flows; prefer the Nest route for CRM invoice checkout. Still verify with `constructEvent` — never trust raw JSON.
 
 ## Edge Functions (AI)
 

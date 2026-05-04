@@ -174,6 +174,18 @@ model FreelanceInvoice {
   @@map("invoices")
 }
 
+/// Dedupes Stripe webhook deliveries (Stripe retries; same event.id must not double-fulfill).
+model ProcessedStripeWebhookEvent {
+  id            String   @id @default(uuid()) @db.Uuid
+  stripeEventId String   @unique @map("stripe_event_id") @db.VarChar(255)
+  eventType     String   @map("event_type") @db.VarChar(64)
+  invoiceId     String?  @map("invoice_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([invoiceId])
+  @@map("processed_stripe_webhook_events")
+}
+
 /// File metadata for objects stored in Supabase Storage (`user-files` bucket).
 model UserAttachment {
   id         String   @id @default(uuid()) @db.Uuid

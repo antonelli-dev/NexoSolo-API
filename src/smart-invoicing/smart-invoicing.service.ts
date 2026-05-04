@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 
 import { AppLogger } from '../common/logger.service';
@@ -391,30 +391,95 @@ export class SmartInvoicingService {
     });
   }
 
-  async markInvoiceAsPaid(invoiceId: string, provider: string, transactionId: string): Promise<void> {
+  /**
+   * Idempotent: stores Stripe event id first, then marks invoice paid if not already.
+   * Safe under concurrent deliveries and Stripe retries.
+   */
+  async markInvoiceAsPaidFromStripeWebhook(
+    stripeEventId: string,
+    invoiceId: string,
+    checkoutSessionId: string,
+    sessionAmountTotalCents?: number,
+    sessionCurrency?: string,
+    sessionPaymentStatus?: string,
+  ): Promise<void> {
     const invoice = await this.prisma.freelanceInvoice.findUnique({
       where: { id: invoiceId },
       include: { project: true },
     });
 
     if (!invoice) {
-      throw new Error(`Invoice ${invoiceId} not found`);
-    }
-
-    if (invoice.status === 'paid') {
-      this.logger.logBusinessEvent('invoice_already_paid', invoice.project.userId, { invoiceId });
+      this.logger.error('Stripe webhook: invoice not found', {
+        invoiceId,
+        stripeEventId,
+      });
       return;
     }
 
-    await this.prisma.freelanceInvoice.update({
-      where: { id: invoiceId },
-      data: { status: 'paid' },
-    });
+    if (sessionPaymentStatus && sessionPaymentStatus !== 'paid') {
+      this.logger.warn('Stripe webhook: session not paid, skipping', {
+        invoiceId,
+        stripeEventId,
+        sessionPaymentStatus,
+      });
+      return;
+    }
+
+    if (typeof sessionAmountTotalCents === 'number') {
+      const expectedCents = Math.round(Number(invoice.amount) * 100);
+      if (sessionAmountTotalCents !== expectedCents) {
+        this.logger.error('Stripe webhook: amount_total does not match invoice', {
+          invoiceId,
+          stripeEventId,
+          expectedCents,
+          sessionAmountTotalCents,
+        });
+        return;
+      }
+    }
+
+    if (sessionCurrency && sessionCurrency.toUpperCase() !== invoice.currency.toUpperCase()) {
+      this.logger.error('Stripe webhook: currency mismatch', {
+        invoiceId,
+        stripeEventId,
+        invoiceCurrency: invoice.currency,
+        sessionCurrency,
+      });
+      return;
+    }
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.processedStripeWebhookEvent.create({
+          data: {
+            stripeEventId,
+            eventType: 'checkout.session.completed',
+            invoiceId,
+          },
+        });
+        await tx.freelanceInvoice.updateMany({
+          where: { id: invoiceId, NOT: { status: 'paid' } },
+          data: {
+            status: 'paid',
+            stripeCheckoutSessionId: checkoutSessionId,
+          },
+        });
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        this.logger.logBusinessEvent('stripe_webhook_duplicate_event', 'system', {
+          stripeEventId,
+          invoiceId,
+        });
+        return;
+      }
+      throw err;
+    }
 
     this.logger.logBusinessEvent('invoice_paid', invoice.project.userId, {
       invoiceId,
-      provider,
-      transactionId,
+      provider: 'stripe',
+      transactionId: checkoutSessionId,
       amount: Number(invoice.amount),
       currency: invoice.currency,
     });

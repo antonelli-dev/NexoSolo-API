@@ -7,6 +7,7 @@ import type { PaymentProviderPort } from '../ports/payment-provider.port';
 import type { InvoiceForCheckout, PaymentMethodForProvider } from '../payment-models';
 
 export interface StripeWebhookEvent {
+  id: string;
   type: string;
   data: {
     object: Record<string, unknown>;
@@ -58,26 +59,29 @@ export class StripeAdapter implements PaymentProviderPort {
     });
     const label = invoice.invoiceNumber ?? invoice.id.slice(0, 8);
     try {
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price_data: {
-              currency: invoice.currency.toLowerCase(),
-              product_data: {
-                name: `Invoice ${label}`,
-                description: `Project: ${invoice.projectName}`,
+      const session = await stripe.checkout.sessions.create(
+        {
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              price_data: {
+                currency: invoice.currency.toLowerCase(),
+                product_data: {
+                  name: `Invoice ${label}`,
+                  description: `Project: ${invoice.projectName}`,
+                },
+                unit_amount: Math.round(Number(invoice.amountDecimal) * 100),
               },
-              unit_amount: Math.round(Number(invoice.amountDecimal) * 100),
+              quantity: 1,
             },
-            quantity: 1,
-          },
-        ],
-        mode: 'payment',
-        success_url: `${process.env.FRONTEND_URL || 'https://app.rizzup.com'}/pay/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.FRONTEND_URL || 'https://app.rizzup.com'}/pay/cancel`,
-        client_reference_id: invoice.id,
-      });
+          ],
+          mode: 'payment',
+          success_url: `${process.env.FRONTEND_URL || 'https://app.rizzup.com'}/pay/success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.FRONTEND_URL || 'https://app.rizzup.com'}/pay/cancel`,
+          client_reference_id: invoice.id,
+        },
+        { idempotencyKey: `checkout_inv_${invoice.id}` },
+      );
       return session.url ?? '';
     } catch (error) {
       this.logger.error('Failed to generate Stripe link', {
@@ -101,6 +105,7 @@ export class StripeAdapter implements PaymentProviderPort {
       webhookSecret,
     );
     return {
+      id: constructed.id,
       type: constructed.type,
       data: { object: unknownToRecord(constructed.data.object) },
     };

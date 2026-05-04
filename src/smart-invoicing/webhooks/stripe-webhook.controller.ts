@@ -65,8 +65,21 @@ export class StripeWebhookController {
       if ('client_reference_id' in session && typeof session.client_reference_id === 'string') {
         const invoiceId = session.client_reference_id;
         const sessionId = typeof session.id === 'string' ? session.id : 'unknown';
+        const amountTotalCents =
+          typeof session.amount_total === 'number' ? session.amount_total : undefined;
+        const currency =
+          typeof session.currency === 'string' ? session.currency : undefined;
+        const paymentStatus =
+          typeof session.payment_status === 'string' ? session.payment_status : undefined;
         this.logger.logBusinessEvent('stripe_checkout_completed', 'system', { invoiceId, sessionId });
-        await this.smartInvoicingService.markInvoiceAsPaid(invoiceId, 'stripe', sessionId);
+        await this.smartInvoicingService.markInvoiceAsPaidFromStripeWebhook(
+          event.id,
+          invoiceId,
+          sessionId,
+          amountTotalCents,
+          currency,
+          paymentStatus,
+        );
       } else {
         const sessionId = typeof session.id === 'string' ? session.id : 'unknown';
         this.logger.error('Stripe checkout completed but no client_reference_id found', { sessionId });
