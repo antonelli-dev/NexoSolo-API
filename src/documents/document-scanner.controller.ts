@@ -27,7 +27,7 @@ export class DocumentScannerController {
   @UseInterceptors(FileInterceptor('file'))
   async scanDocument(
     @Req() req: Authed,
-    @UploadedFile() file: any,
+    @UploadedFile() file: Express.Multer.File,
     @Body('type') documentType: 'receipt' | 'invoice' | 'contract' | 'business_card',
   ) {
     if (!file) {

@@ -44,8 +44,30 @@ model Profile {
 
   userAttachments UserAttachment[]
   budgetExpenses  PersonalBudgetExpense[]
+  paymentMethods  UserPaymentMethod[]
 
   @@map("profiles")
+}
+
+/// Per-user payout / checkout configuration (Stripe secret key, bank hints, etc.). Managed via Nest; not exposed to Supabase clients by default.
+model UserPaymentMethod {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  type           String   @db.VarChar(16)
+  name           String   @db.VarChar(160)
+  isActive       Boolean  @default(true) @map("is_active")
+  accountDetails Json?    @map("account_details")
+  feePercentage  Decimal  @default(0) @map("fee_percentage") @db.Decimal(5, 2)
+  feeFixed       Int      @default(0) @map("fee_fixed")
+  feeCurrency    String   @default("USD") @map("fee_currency") @db.VarChar(3)
+  processingTime String   @default("Instant") @map("processing_time") @db.VarChar(32)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_payment_methods")
 }
 
 /// User-entered monthly fixed costs (rent, software, etc.) for the in-app finance planner — not tax advice.

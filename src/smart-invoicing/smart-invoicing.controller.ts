@@ -8,11 +8,15 @@ import {
   Req,
   UseGuards,
   Param,
-  Query,
 } from '@nestjs/common';
 import { SmartInvoicingService } from './smart-invoicing.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { Request } from 'express';
+import {
+  CreateUserPaymentMethodDto,
+  UpdateUserPaymentMethodDto,
+} from './dto/payment-method.dto';
+import type { UserPaymentMethodResponse } from './payment-models';
 
 type Authed = Request & { user: { sub: string } };
 
@@ -22,83 +26,62 @@ export class SmartInvoicingController {
   constructor(private readonly smartInvoicing: SmartInvoicingService) {}
 
   @Get('invoice/:invoiceId')
-  async getSmartInvoice(
-    @Req() req: Authed,
-    @Param('invoiceId') invoiceId: string,
-  ) {
+  getSmartInvoice(@Req() req: Authed, @Param('invoiceId') invoiceId: string) {
     return this.smartInvoicing.getSmartInvoice(req.user.sub, invoiceId);
   }
 
   @Get('payment-methods')
-  async getPaymentMethods(@Req() req: Authed) {
-    return this.smartInvoicing.getUserPaymentMethods(req.user.sub);
+  listPaymentMethods(@Req() req: Authed): Promise<UserPaymentMethodResponse[]> {
+    return this.smartInvoicing.listPaymentMethods(req.user.sub);
   }
 
   @Post('payment-methods')
-  async addPaymentMethod(
+  createPaymentMethod(
     @Req() req: Authed,
-    @Body() method: {
-      type: 'stripe' | 'paypal' | 'wise' | 'bank' | 'crypto';
-      name: string;
-      isActive: boolean;
-      accountDetails?: Record<string, any>;
-      fees: {
-        percentage: number;
-        fixed: number;
-        currency: string;
-      };
-      processingTime: string;
-    },
-  ) {
-    return this.smartInvoicing.addPaymentMethod(req.user.sub, method);
+    @Body() dto: CreateUserPaymentMethodDto,
+  ): Promise<UserPaymentMethodResponse> {
+    return this.smartInvoicing.createPaymentMethod(req.user.sub, dto);
   }
 
   @Put('payment-methods/:methodId')
-  async updatePaymentMethod(
+  updatePaymentMethod(
     @Req() req: Authed,
     @Param('methodId') methodId: string,
-    @Body() updates: Partial<{
-      type: 'stripe' | 'paypal' | 'wise' | 'bank' | 'crypto';
-      name: string;
-      isActive: boolean;
-      accountDetails?: Record<string, any>;
-      fees: {
-        percentage: number;
-        fixed: number;
-        currency: string;
-      };
-      processingTime: string;
-    }>,
-  ) {
-    return this.smartInvoicing.updatePaymentMethod(req.user.sub, methodId, updates);
+    @Body() dto: UpdateUserPaymentMethodDto,
+  ): Promise<UserPaymentMethodResponse> {
+    return this.smartInvoicing.updatePaymentMethod(req.user.sub, methodId, dto);
   }
 
   @Delete('payment-methods/:methodId')
-  async deletePaymentMethod(
-    @Req() req: Authed,
-    @Param('methodId') methodId: string,
-  ) {
-    return this.smartInvoicing.deletePaymentMethod(req.user.sub, methodId);
+  removePaymentMethod(@Req() req: Authed, @Param('methodId') methodId: string) {
+    return this.smartInvoicing.removePaymentMethod(req.user.sub, methodId);
   }
 
   @Get('qr-code/:invoiceId')
-  async getQRCode(
+  getQRCode(
     @Req() req: Authed,
     @Param('invoiceId') invoiceId: string,
   ) {
-    return { qrCode: await this.smartInvoicing.generateQRCode(invoiceId) };
+    return { qrCode: 'https://app.rizzup.com/pay/' + invoiceId };
+  }
+
+  @Get('pdf/:invoiceId')
+  async getInvoicePdf(@Req() req: Authed, @Param('invoiceId') invoiceId: string) {
+    const buffer = await this.smartInvoicing.generatePdf(invoiceId, req.user.sub);
+    return {
+      base64: buffer.toString('base64'),
+      contentType: 'application/pdf',
+      filename: `invoice-${invoiceId}.pdf`,
+    };
   }
 
   @Get('payment-links/:invoiceId')
-  async getPaymentLinks(
-    @Req() req: Authed,
-    @Param('invoiceId') invoiceId: string,
-  ) {
+  getPaymentLinks(@Req() req: Authed, @Param('invoiceId') invoiceId: string) {
     return this.smartInvoicing.generatePaymentLinks(req.user.sub, invoiceId);
   }
 
   @Get('reminders/:invoiceId')
-  async getSmartReminders(
+  getSmartReminders(
     @Req() req: Authed,
     @Param('invoiceId') invoiceId: string,
   ) {
@@ -106,12 +89,12 @@ export class SmartInvoicingController {
   }
 
   @Get('pending-reminders')
-  async getPendingReminders() {
+  getPendingReminders() {
     return this.smartInvoicing.getPendingReminders();
   }
 
   @Post('send-reminder/:invoiceId/:reminderId')
-  async sendSmartReminder(
+  sendSmartReminder(
     @Req() req: Authed,
     @Param('invoiceId') invoiceId: string,
     @Param('reminderId') reminderId: string,

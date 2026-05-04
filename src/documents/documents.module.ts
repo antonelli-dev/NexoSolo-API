@@ -1,10 +1,11 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { DocumentScannerController } from './document-scanner.controller';
 import { DocumentScannerService } from './document-scanner.service';
 import { PrismaModule } from '../prisma/prisma.module';
+import { AiModule } from '../ai/ai.module';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, forwardRef(() => AiModule)],
   controllers: [DocumentScannerController],
   providers: [DocumentScannerService],
   exports: [DocumentScannerService],

@@ -1,4 +1,5 @@
-import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Post, Req, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 
@@ -11,6 +12,7 @@ import { InvoiceChaseMessageDto } from './dto/invoice-chase-message.dto';
 import { PricingCoachDto } from './dto/pricing-coach.dto';
 import { RewriteScopeDto } from './dto/rewrite-scope.dto';
 import { ScopeRiskLineDto } from './dto/scope-risk-line.dto';
+import { ChatDto } from './dto/chat.dto';
 
 type Authed = Request & { user: { sub: string } };
 
@@ -58,5 +60,22 @@ export class AiController {
   @Post('rewrite-scope')
   rewriteScope(@Req() req: Authed, @Body() dto: RewriteScopeDto) {
     return this.ai.rewriteScope(req.user.sub, dto);
+  }
+
+  @Post('chat')
+  chat(@Req() req: Authed, @Body() dto: ChatDto) {
+    return this.ai.chat(req.user.sub, dto);
+  }
+
+  @Post('analyze-document')
+  @UseInterceptors(FileInterceptor('file'))
+  analyzeDocument(
+    @Req() req: Authed,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) {
+      throw new Error('No file uploaded');
+    }
+    return this.ai.analyzeDocument(req.user.sub, file.buffer, file.mimetype, file.originalname);
   }
 }

@@ -13,7 +13,7 @@ export type CompleteChatParams = {
   /** Model id; sensible defaults per provider */
   model?: string;
   system: string;
-  user: string;
+  user: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
   maxTokens?: number;
 };
 
@@ -34,7 +34,7 @@ async function completeOpenAiCompatible(
   apiKey: string,
   model: string,
   system: string,
-  user: string,
+  user: string | Array<{ type: string; text?: string; image_url?: { url: string } }>,
   maxTokens: number,
 ): Promise<string> {
   const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
@@ -69,9 +69,23 @@ async function completeAnthropic(
   apiKey: string,
   model: string,
   system: string,
-  user: string,
+  user: string | Array<{ type: string; text?: string; image_url?: { url: string } }>,
   maxTokens: number,
 ): Promise<string> {
+  // Map OpenAI-style image_url to Anthropic's image source format if needed
+  const anthropicUser = typeof user === 'string' ? user : user.map(u => {
+    if (u.type === 'image_url' && u.image_url) {
+      const match = u.image_url.url.match(/^data:(image\/[a-z]+);base64,(.+)$/);
+      if (match) {
+        return {
+          type: 'image',
+          source: { type: 'base64', media_type: match[1], data: match[2] }
+        };
+      }
+    }
+    return u;
+  });
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -83,7 +97,7 @@ async function completeAnthropic(
       model,
       max_tokens: maxTokens,
       system,
-      messages: [{ role: 'user', content: user }],
+      messages: [{ role: 'user', content: anthropicUser }],
     }),
   });
   if (!res.ok) {

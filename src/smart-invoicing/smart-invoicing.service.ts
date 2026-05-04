@@ -1,76 +1,104 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { AppLogger } from '../common/logger.service';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Prisma } from '@prisma/client';
+import PDFDocument from 'pdfkit';
 
-export interface SmartInvoice {
-  id: string;
-  invoiceNumber: string;
-  amount: number;
-  currency: string;
-  dueDate: Date;
-  clientName: string;
-  projectName: string;
-  status: string;
-  qrCode: string;
-  paymentLinks: PaymentLink[];
-  smartReminders: SmartReminder[];
-}
-
-export interface PaymentLink {
-  id: string;
-  type: 'stripe' | 'paypal' | 'wise' | 'bank_transfer' | 'crypto';
-  url: string;
-  label: string;
-  icon: string;
-  fee?: number;
-  processingTime?: string;
-}
-
-export interface SmartReminder {
-  id: string;
-  daysBeforeDue: number;
-  daysAfterDue: number;
-  type: 'email' | 'push' | 'sms';
-  template: string;
-  sent: boolean;
-  sentAt?: Date;
-}
-
-export interface PaymentMethod {
-  id: string;
-  type: 'stripe' | 'paypal' | 'wise' | 'bank' | 'crypto';
-  name: string;
-  isActive: boolean;
-  accountDetails?: Record<string, any>;
-  fees: {
-    percentage: number;
-    fixed: number;
-    currency: string;
-  };
-  processingTime: string;
-}
+import { AppLogger } from '../common/logger.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { CryptoAdapter } from './adapters/crypto.adapter';
+import { PayPalAdapter } from './adapters/paypal.adapter';
+import { StripeAdapter } from './adapters/stripe.adapter';
+import { WiseAdapter } from './adapters/wise.adapter';
+import {
+  accountDetailsToRecord,
+  CreateUserPaymentMethodDto,
+  UpdateUserPaymentMethodDto,
+} from './dto/payment-method.dto';
+import {
+  mergeAccountDetails,
+  toPaymentMethodForProvider,
+  toUserPaymentMethodResponse,
+} from './payment-mapper';
+import type {
+  InvoiceForCheckout,
+  PaymentLinkShape,
+  SmartInvoice,
+  SmartReminderShape,
+  UserPaymentMethodResponse,
+} from './payment-models';
+import type { PaymentProviderPort } from './ports/payment-provider.port';
 
 @Injectable()
 export class SmartInvoicingService {
   private readonly logger: AppLogger;
+  private readonly paymentProviders: Map<string, PaymentProviderPort> = new Map();
 
-  constructor(private readonly prisma: PrismaService, private readonly config: ConfigService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+    private readonly stripeAdapter: StripeAdapter,
+    private readonly paypalAdapter: PayPalAdapter,
+    private readonly wiseAdapter: WiseAdapter,
+    private readonly cryptoAdapter: CryptoAdapter,
+  ) {
     this.logger = new AppLogger(config);
+    this.paymentProviders.set(this.stripeAdapter.getProviderId(), this.stripeAdapter);
+    this.paymentProviders.set(this.paypalAdapter.getProviderId(), this.paypalAdapter);
+    this.paymentProviders.set(this.wiseAdapter.getProviderId(), this.wiseAdapter);
+    this.paymentProviders.set(this.cryptoAdapter.getProviderId(), this.cryptoAdapter);
   }
 
-  async generateQRCode(invoiceId: string): Promise<string> {
-    // Generate QR code that links to invoice payment page
-    const baseUrl = process.env.FRONTEND_URL || 'https://app.rizzup.com';
-    const paymentUrl = `${baseUrl}/pay/${invoiceId}`;
-    
-    // TODO: Use QR code library to generate actual QR code
-    // For now, return the URL that would be encoded in QR
-    return paymentUrl;
+  async generatePdf(invoiceId: string, userId: string): Promise<Buffer> {
+    const invoice = await this.prisma.freelanceInvoice.findFirst({
+      where: { id: invoiceId, project: { userId } },
+      include: { project: { include: { client: true, user: true } } },
+    });
+
+    if (!invoice) throw new Error('Invoice not found');
+
+    return new Promise((resolve, reject) => {
+      const doc = new PDFDocument({ margin: 50 });
+      const chunks: Buffer[] = [];
+
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      doc.fontSize(20).text('INVOICE', { align: 'right' });
+      doc
+        .fontSize(10)
+        .text(`Invoice Number: ${invoice.invoiceNumber ?? invoice.id.slice(0, 8)}`, {
+          align: 'right',
+        });
+      doc.text(`Date: ${invoice.createdAt.toLocaleDateString()}`, { align: 'right' });
+      doc.text(
+        `Due Date: ${invoice.dueDate?.toLocaleDateString() ?? 'Upon receipt'}`,
+        { align: 'right' },
+      );
+
+      doc.moveDown();
+      doc.fontSize(12).text('From:');
+      doc.fontSize(10).text(invoice.project.user.email ?? 'Freelancer');
+      doc.moveDown();
+      doc.fontSize(12).text('To:');
+      doc.fontSize(10).text(invoice.project.client.name);
+      if (invoice.project.client.email) doc.text(invoice.project.client.email);
+      doc.moveDown(2);
+      doc.fontSize(14).text('Project Details');
+      doc.fontSize(10).text(`Project: ${invoice.project.name}`);
+      if (invoice.memo) doc.text(`Memo: ${invoice.memo}`);
+      doc.moveDown(2);
+      doc.fontSize(14).text('Total Amount', { align: 'right' });
+      doc
+        .fontSize(24)
+        .text(`${Number(invoice.amount).toFixed(2)} ${invoice.currency}`, { align: 'right' });
+
+      doc.end();
+    });
   }
 
-  async generatePaymentLinks(userId: string, invoiceId: string): Promise<PaymentLink[]> {
-    const paymentMethods = await this.getUserPaymentMethods(userId);
+  async generatePaymentLinks(userId: string, invoiceId: string): Promise<PaymentLinkShape[]> {
+    const rows = await this.loadActiveMethodRows(userId);
     const invoice = await this.prisma.freelanceInvoice.findFirst({
       where: { id: invoiceId, project: { userId } },
       include: { project: { include: { client: true } } },
@@ -80,79 +108,53 @@ export class SmartInvoicingService {
       throw new Error('Invoice not found');
     }
 
-    const links: PaymentLink[] = [];
+    const checkout = this.invoiceToCheckout(invoice);
+    const links: PaymentLinkShape[] = [];
 
-    for (const method of paymentMethods.filter(m => m.isActive)) {
-      switch (method.type) {
-        case 'stripe':
-          links.push({
-            id: `stripe_${invoiceId}`,
-            type: 'stripe',
-            url: this.generateStripePaymentLink(invoice, method),
-            label: 'Pay with Card',
-            icon: 'credit-card',
-            fee: method.fees.percentage,
-            processingTime: 'Instant',
-          });
-          break;
-        case 'paypal':
-          links.push({
-            id: `paypal_${invoiceId}`,
-            type: 'paypal',
-            url: this.generatePayPalPaymentLink(invoice, method),
-            label: 'Pay with PayPal',
-            icon: 'paypal',
-            fee: method.fees.percentage,
-            processingTime: 'Instant',
-          });
-          break;
-        case 'wise':
-          links.push({
-            id: `wise_${invoiceId}`,
-            type: 'wise',
-            url: this.generateWisePaymentLink(invoice, method),
-            label: 'Pay with Wise',
-            icon: 'globe',
-            fee: method.fees.percentage,
-            processingTime: '1-2 days',
-          });
-          break;
-        case 'bank':
-          links.push({
-            id: `bank_${invoiceId}`,
-            type: 'bank_transfer',
-            url: this.generateBankTransferDetails(invoice, method),
-            label: 'Bank Transfer',
-            icon: 'building',
-            fee: 0,
-            processingTime: '1-3 days',
-          });
-          break;
-        case 'crypto':
-          links.push({
-            id: `crypto_${invoiceId}`,
-            type: 'crypto',
-            url: this.generateCryptoPaymentLink(invoice, method),
-            label: 'Pay with Crypto',
-            icon: 'bitcoin',
-            fee: method.fees.percentage,
-            processingTime: 'Instant',
-          });
-          break;
+    for (const row of rows) {
+      if (row.type === 'bank') {
+        links.push({
+          id: `bank_${invoiceId}`,
+          type: 'bank_transfer',
+          url: this.bankTransferUrl(invoice.id),
+          label: 'Bank Transfer',
+          icon: 'building',
+          fee: Number(row.feePercentage),
+          processingTime: row.processingTime,
+        });
+        continue;
       }
+
+      const provider = this.paymentProviders.get(row.type);
+      const methodPayload = toPaymentMethodForProvider(row.type, row.accountDetails);
+      if (!provider || !methodPayload) {
+        continue;
+      }
+
+      const linkType = this.linkTypeForProviderRow(row.type);
+      links.push({
+        id: `${row.type}_${invoiceId}`,
+        type: linkType,
+        url: await provider.generatePaymentLink(checkout, methodPayload),
+        label: `Pay with ${row.name}`,
+        icon: this.iconForType(row.type),
+        fee: Number(row.feePercentage),
+        processingTime: row.processingTime,
+      });
     }
 
     return links;
   }
 
-  async createSmartReminders(invoiceId: string): Promise<SmartReminder[]> {
-    const reminders: SmartReminder[] = [
+  async createSmartReminders(invoiceId: string): Promise<SmartReminderShape[]> {
+    return [
       {
         id: `reminder_1_${invoiceId}`,
         daysBeforeDue: 7,
         daysAfterDue: 0,
         type: 'email',
-        template: 'Hi {{clientName}}, this is a friendly reminder that invoice {{invoiceNumber}} for {{amount}} {{currency}} is due in 7 days on {{dueDate}}.',
+        template:
+          'Hi {{clientName}}, this is a friendly reminder that invoice {{invoiceNumber}} for {{amount}} {{currency}} is due in 7 days on {{dueDate}}.',
         sent: false,
       },
       {
@@ -160,7 +162,8 @@ export class SmartInvoicingService {
         daysBeforeDue: 3,
         daysAfterDue: 0,
         type: 'email',
-        template: 'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is due in 3 days. You can pay easily using the payment links in the invoice.',
+        template:
+          'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is due in 3 days. You can pay easily using the payment links in the invoice.',
         sent: false,
       },
       {
@@ -168,7 +171,8 @@ export class SmartInvoicingService {
         daysBeforeDue: 0,
         daysAfterDue: 0,
         type: 'email',
-        template: 'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is due today. Please complete your payment at your earliest convenience.',
+        template:
+          'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is due today. Please complete your payment at your earliest convenience.',
         sent: false,
       },
       {
@@ -176,7 +180,8 @@ export class SmartInvoicingService {
         daysBeforeDue: 0,
         daysAfterDue: 3,
         type: 'email',
-        template: 'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is now 3 days overdue. Please let us know if you have any questions about the payment.',
+        template:
+          'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is now 3 days overdue. Please let us know if you have any questions about the payment.',
         sent: false,
       },
       {
@@ -184,7 +189,8 @@ export class SmartInvoicingService {
         daysBeforeDue: 0,
         daysAfterDue: 7,
         type: 'email',
-        template: 'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is now 7 days overdue. This is a follow-up reminder to complete your payment.',
+        template:
+          'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is now 7 days overdue. This is a follow-up reminder to complete your payment.',
         sent: false,
       },
       {
@@ -192,13 +198,11 @@ export class SmartInvoicingService {
         daysBeforeDue: 0,
         daysAfterDue: 14,
         type: 'email',
-        template: 'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is now 14 days overdue. Please contact us immediately to arrange payment.',
+        template:
+          'Hi {{clientName}}, invoice {{invoiceNumber}} for {{amount}} {{currency}} is now 14 days overdue. Please contact us immediately to arrange payment.',
         sent: false,
       },
     ];
-
-    // TODO: Save reminders to database
-    return reminders;
   }
 
   async getSmartInvoice(userId: string, invoiceId: string): Promise<SmartInvoice> {
@@ -211,16 +215,16 @@ export class SmartInvoicingService {
       throw new Error('Invoice not found');
     }
 
-    const qrCode = await this.generateQRCode(invoiceId);
+    const qrCode = `https://app.rizzup.com/pay/${invoiceId}`;
     const paymentLinks = await this.generatePaymentLinks(userId, invoiceId);
     const smartReminders = await this.createSmartReminders(invoiceId);
 
     return {
       id: invoice.id,
-      invoiceNumber: invoice.invoiceNumber || invoice.id.slice(0, 8),
+      invoiceNumber: invoice.invoiceNumber ?? invoice.id.slice(0, 8),
       amount: Number(invoice.amount),
       currency: invoice.currency,
-      dueDate: invoice.dueDate || new Date(),
+      dueDate: invoice.dueDate ?? new Date(),
       clientName: invoice.project.client.name,
       projectName: invoice.project.name,
       status: invoice.status,
@@ -230,92 +234,111 @@ export class SmartInvoicingService {
     };
   }
 
-  async getUserPaymentMethods(userId: string): Promise<PaymentMethod[]> {
-    // TODO: Get from database
-    return [
-      {
-        id: 'pm_stripe_1',
-        type: 'stripe',
-        name: 'Stripe Credit Card',
-        isActive: true,
-        accountDetails: { accountId: 'acct_1234567890' },
-        fees: { percentage: 2.9, fixed: 30, currency: 'USD' },
-        processingTime: 'Instant',
-      },
-      {
-        id: 'pm_paypal_1',
-        type: 'paypal',
-        name: 'PayPal Business',
-        isActive: true,
-        accountDetails: { email: 'business@example.com' },
-        fees: { percentage: 3.4, fixed: 30, currency: 'USD' },
-        processingTime: 'Instant',
-      },
-      {
-        id: 'pm_bank_1',
-        type: 'bank',
-        name: 'Bank Transfer',
-        isActive: true,
-        accountDetails: {
-          bankName: 'Chase Bank',
-          accountNumber: '****1234',
-          routingNumber: '****5678',
-        },
-        fees: { percentage: 0, fixed: 0, currency: 'USD' },
-        processingTime: '1-3 days',
-      },
-    ];
-  }
-
-  async addPaymentMethod(userId: string, method: Omit<PaymentMethod, 'id'>): Promise<PaymentMethod> {
-    // TODO: Save to database
-    const newMethod: PaymentMethod = {
-      ...method,
-      id: `pm_${Date.now()}`,
-    };
-    return newMethod;
-  }
-
-  async updatePaymentMethod(userId: string, methodId: string, updates: Partial<PaymentMethod>): Promise<PaymentMethod> {
-    // TODO: Update in database
-    const methods = await this.getUserPaymentMethods(userId);
-    const method = methods.find(m => m.id === methodId);
-    if (!method) {
-      throw new Error('Payment method not found');
-    }
-    return { ...method, ...updates };
-  }
-
-  async deletePaymentMethod(userId: string, methodId: string): Promise<void> {
-    // TODO: Delete from database
-    this.logger.logBusinessEvent('payment_method_deleted', userId, {
-      methodId,
+  async listPaymentMethods(userId: string): Promise<UserPaymentMethodResponse[]> {
+    const rows = await this.prisma.userPaymentMethod.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
     });
+    return rows.map((r) => toUserPaymentMethodResponse(r));
   }
 
-  async getPendingReminders(): Promise<Array<{
-    invoiceId: string;
-    reminderId: string;
-    type: string;
-    template: string;
-    variables: Record<string, any>;
-  }>> {
-    // TODO: Get from database based on due dates
-    const now = new Date();
-    const reminders = [];
+  async createPaymentMethod(
+    userId: string,
+    dto: CreateUserPaymentMethodDto,
+  ): Promise<UserPaymentMethodResponse> {
+    const jsonDetails = accountDetailsToRecord(dto.accountDetails);
+    const row = await this.prisma.userPaymentMethod.create({
+      data: {
+        userId,
+        type: dto.type,
+        name: dto.name,
+        isActive: dto.isActive,
+        processingTime: dto.processingTime,
+        feePercentage: dto.fees.percentage,
+        feeFixed: dto.fees.fixed,
+        feeCurrency: dto.fees.currency,
+        ...(jsonDetails !== undefined ? { accountDetails: jsonDetails } : {}),
+      },
+    });
+    return toUserPaymentMethodResponse(row);
+  }
 
-    // Mock logic - in production this would query database
+  async updatePaymentMethod(
+    userId: string,
+    methodId: string,
+    dto: UpdateUserPaymentMethodDto,
+  ): Promise<UserPaymentMethodResponse> {
+    const existing = await this.prisma.userPaymentMethod.findFirst({
+      where: { id: methodId, userId },
+    });
+    if (!existing) {
+      throw new NotFoundException('Payment method not found');
+    }
+
+    const patch: Prisma.UserPaymentMethodUpdateInput = {};
+    if (dto.name !== undefined) patch.name = dto.name;
+    if (dto.isActive !== undefined) patch.isActive = dto.isActive;
+    if (dto.processingTime !== undefined) patch.processingTime = dto.processingTime;
+    if (dto.fees) {
+      patch.feePercentage = dto.fees.percentage;
+      patch.feeFixed = dto.fees.fixed;
+      patch.feeCurrency = dto.fees.currency;
+    }
+
+    const incoming = accountDetailsToRecord(dto.accountDetails);
+    if (incoming !== undefined) {
+      patch.accountDetails = mergeAccountDetails(existing.accountDetails, incoming);
+    }
+
+    const row = await this.prisma.userPaymentMethod.update({
+      where: { id: methodId },
+      data: patch,
+    });
+    return toUserPaymentMethodResponse(row);
+  }
+
+  async removePaymentMethod(userId: string, methodId: string): Promise<void> {
+    const res = await this.prisma.userPaymentMethod.deleteMany({
+      where: { id: methodId, userId },
+    });
+    if (res.count === 0) {
+      throw new NotFoundException('Payment method not found');
+    }
+    this.logger.logBusinessEvent('payment_method_deleted', userId, { methodId });
+  }
+
+  async getPendingReminders(): Promise<
+    Array<{
+      invoiceId: string;
+      reminderId: string;
+      type: string;
+      template: string;
+      variables: Record<string, string | number>;
+    }>
+  > {
+    const now = new Date();
+    const reminders: Array<{
+      invoiceId: string;
+      reminderId: string;
+      type: string;
+      template: string;
+      variables: Record<string, string | number>;
+    }> = [];
+
     const invoices = await this.prisma.freelanceInvoice.findMany({
       where: { status: 'sent' },
       include: { project: { include: { client: true } } },
     });
 
     for (const invoice of invoices) {
-      const dueDate = invoice.dueDate || invoice.createdAt;
-      const daysUntilDue = Math.ceil((dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-      const daysOverdue = Math.ceil((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
+      const dueDate = invoice.dueDate ?? invoice.createdAt;
+      const daysUntilDue = Math.ceil(
+        (dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
+      );
+      const daysOverdue = Math.ceil(
+        (now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24),
+      );
 
-      // Check for reminders that should be sent
       if (daysUntilDue === 7 || daysUntilDue === 3 || daysUntilDue === 0) {
         reminders.push({
           invoiceId: invoice.id,
@@ -323,7 +346,7 @@ export class SmartInvoicingService {
           type: 'email',
           template: `Reminder for invoice {{invoiceNumber}} due in ${daysUntilDue} days`,
           variables: {
-            invoiceNumber: invoice.invoiceNumber || invoice.id.slice(0, 8),
+            invoiceNumber: invoice.invoiceNumber ?? invoice.id.slice(0, 8),
             amount: Number(invoice.amount),
             currency: invoice.currency,
             clientName: invoice.project.client.name,
@@ -339,7 +362,7 @@ export class SmartInvoicingService {
           type: 'email',
           template: `Invoice {{invoiceNumber}} is ${daysOverdue} days overdue`,
           variables: {
-            invoiceNumber: invoice.invoiceNumber || invoice.id.slice(0, 8),
+            invoiceNumber: invoice.invoiceNumber ?? invoice.id.slice(0, 8),
             amount: Number(invoice.amount),
             currency: invoice.currency,
             clientName: invoice.project.client.name,
@@ -353,7 +376,6 @@ export class SmartInvoicingService {
   }
 
   async sendSmartReminder(invoiceId: string, reminderId: string): Promise<void> {
-    // TODO: Get invoice and reminder details
     const invoice = await this.prisma.freelanceInvoice.findFirst({
       where: { id: invoiceId },
       include: { project: { include: { client: true, user: true } } },
@@ -363,40 +385,82 @@ export class SmartInvoicingService {
       throw new Error('Invoice not found');
     }
 
-    // TODO: Send email using notification service
     this.logger.logBusinessEvent('invoice_reminder_sent', invoice.project.userId, {
       invoiceId,
       reminderId,
     });
   }
 
-  private generateStripePaymentLink(invoice: any, method: PaymentMethod): string {
-    // TODO: Generate actual Stripe payment link
-    const baseUrl = 'https://checkout.stripe.com';
-    return `${baseUrl}/pay?invoice=${invoice.id}&amount=${Number(invoice.amount) * 100}&currency=${invoice.currency}`;
+  async markInvoiceAsPaid(invoiceId: string, provider: string, transactionId: string): Promise<void> {
+    const invoice = await this.prisma.freelanceInvoice.findUnique({
+      where: { id: invoiceId },
+      include: { project: true },
+    });
+
+    if (!invoice) {
+      throw new Error(`Invoice ${invoiceId} not found`);
+    }
+
+    if (invoice.status === 'paid') {
+      this.logger.logBusinessEvent('invoice_already_paid', invoice.project.userId, { invoiceId });
+      return;
+    }
+
+    await this.prisma.freelanceInvoice.update({
+      where: { id: invoiceId },
+      data: { status: 'paid' },
+    });
+
+    this.logger.logBusinessEvent('invoice_paid', invoice.project.userId, {
+      invoiceId,
+      provider,
+      transactionId,
+      amount: Number(invoice.amount),
+      currency: invoice.currency,
+    });
   }
 
-  private generatePayPalPaymentLink(invoice: any, method: PaymentMethod): string {
-    // TODO: Generate actual PayPal payment link
-    const baseUrl = 'https://www.paypal.com';
-    return `${baseUrl}/pay?invoice=${invoice.id}&amount=${invoice.amount}&currency=${invoice.currency}`;
+  private async loadActiveMethodRows(userId: string) {
+    return this.prisma.userPaymentMethod.findMany({
+      where: { userId, isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
   }
 
-  private generateWisePaymentLink(invoice: any, method: PaymentMethod): string {
-    // TODO: Generate actual Wise payment link
-    const baseUrl = 'https://wise.com';
-    return `${baseUrl}/pay?invoice=${invoice.id}&amount=${invoice.amount}&currency=${invoice.currency}`;
+  private invoiceToCheckout(invoice: {
+    id: string;
+    amount: Prisma.Decimal;
+    currency: string;
+    invoiceNumber: string | null;
+    project: { name: string };
+  }): InvoiceForCheckout {
+    return {
+      id: invoice.id,
+      amountDecimal: invoice.amount.toString(),
+      currency: invoice.currency,
+      invoiceNumber: invoice.invoiceNumber,
+      projectName: invoice.project.name,
+    };
   }
 
-  private generateBankTransferDetails(invoice: any, method: PaymentMethod): string {
-    // TODO: Generate bank transfer details page
-    const baseUrl = process.env.FRONTEND_URL || 'https://app.rizzup.com';
-    return `${baseUrl}/bank-transfer/${invoice.id}`;
+  private bankTransferUrl(invoiceId: string): string {
+    const baseUrl = process.env.FRONTEND_URL ?? 'https://app.rizzup.com';
+    return `${baseUrl}/bank-transfer/${invoiceId}`;
   }
 
-  private generateCryptoPaymentLink(invoice: any, method: PaymentMethod): string {
-    // TODO: Generate crypto payment link
-    const baseUrl = 'https://commerce.coinbase.com';
-    return `${baseUrl}/checkout?invoice=${invoice.id}&amount=${invoice.amount}&currency=${invoice.currency}`;
+  private linkTypeForProviderRow(
+    type: string,
+  ): 'stripe' | 'paypal' | 'wise' | 'bank_transfer' | 'crypto' {
+    if (type === 'bank') return 'bank_transfer';
+    if (type === 'stripe' || type === 'paypal' || type === 'wise' || type === 'crypto') {
+      return type;
+    }
+    return 'stripe';
+  }
+
+  private iconForType(type: string): string {
+    if (type === 'stripe') return 'credit-card';
+    if (type === 'paypal') return 'paypal';
+    return 'wallet';
   }
 }

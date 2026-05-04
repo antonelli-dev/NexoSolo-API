@@ -53,7 +53,7 @@ export class AiService {
     }
   }
 
-  private llmConfig(): {
+  public llmConfig(): {
     provider: LlmProviderName;
     apiKey: string;
     baseUrl?: string;
@@ -339,6 +339,59 @@ Respond ONLY with JSON: { "rewritten": string } (plain text, can use short bulle
       user,
       maxTokens: 2048,
     });
+    return this.parseModelJson(raw);
+  }
+
+  async chat(userId: string, dto: { messages: Array<{role: string, content: string}> }) {
+    const cfg = this.llmConfig();
+    const system = `You are an expert AI assistant for freelancers and solopreneurs. You help with business strategy, pricing, client communication, and project management. Keep answers concise, actionable, and professional.`;
+
+    const history = dto.messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+    const user = `Here is the conversation history:\n\n${history}\n\nPlease provide the next assistant response.`;
+
+    const raw = await this.runLlm({
+      ...cfg,
+      system,
+      user,
+      maxTokens: 2048,
+    });
+    
+    return { response: raw };
+  }
+
+  async analyzeDocument(userId: string, fileBuffer: Buffer, mimeType: string, filename: string) {
+    const cfg = this.llmConfig();
+    let extractedText = '';
+
+    try {
+      if (mimeType === 'application/pdf') {
+        const pdfParse = require('pdf-parse');
+        const data = await pdfParse(fileBuffer);
+        extractedText = data.text;
+      } else {
+        extractedText = fileBuffer.toString('utf-8');
+      }
+    } catch (e) {
+      throw new Error('Failed to parse document');
+    }
+
+    const system = `You are an expert business analyst. Analyze the provided document (e.g., a client brief, requirements doc, or contract).
+Extract the key requirements and generate a step-by-step visual flow/plan for the project.
+Respond ONLY with JSON keys:
+summary (string, brief summary of the document),
+requirements (string[]),
+projectFlow (array of { step: number, title: string, description: string, estimatedDays: number }),
+questionsForClient (string[]).`;
+
+    const user = `Document Name: ${filename}\n\nDocument Content:\n${extractedText.slice(0, 15000)}`;
+
+    const raw = await this.runLlm({
+      ...cfg,
+      system,
+      user,
+      maxTokens: 3000,
+    });
+
     return this.parseModelJson(raw);
   }
 }
