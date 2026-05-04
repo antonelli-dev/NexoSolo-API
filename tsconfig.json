@@ -18,6 +18,10 @@
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": true,
     "strictBindCallApply": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@rizzup/invoice-settings": ["../invoice-settings/src/index.ts"]
+    }
   }
 }
