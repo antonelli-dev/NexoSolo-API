@@ -8,7 +8,7 @@ import {
   type InvoiceDocumentTemplate,
   type ProfilePdfSlice,
   profileSliceForPdf,
-} from './invoice-document-template';
+} from '@rizzup/invoice-settings';
 
 export type InvoicePdfLocale = 'en' | 'es';
 

@@ -25,8 +25,7 @@ import {
   signInvoicePdfDownloadToken,
 } from './invoice-pdf';
 import { buildQuotePdfBuffer, type QuotePdfInput } from './quote-pdf';
-import { consumeNextInvoiceNumber } from './invoice-numbering';
-import type { ProfilePdfSlice } from './invoice-document-template';
+import { consumeNextInvoiceNumber, type ProfilePdfSlice } from '@rizzup/invoice-settings';
 
 const INVOICE_PENDING = ['sent', 'viewed'] as const;
 

@@ -8,12 +8,12 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import type { PatchProfileDto } from './dto/patch-profile.dto';
 import { SubscriptionTier } from '../webhooks/revenuecat.dto';
-import { mergeInvoiceDocumentTemplate } from '../freelance/invoice-document-template';
 import {
   assertInvoiceNumberingStateValid,
+  mergeInvoiceDocumentTemplate,
   normalizeInvoiceNumberingRaw,
   peekNextInvoiceNumber,
-} from '../freelance/invoice-numbering';
+} from '@rizzup/invoice-settings';
 
 @Injectable()
 export class UsersService {
