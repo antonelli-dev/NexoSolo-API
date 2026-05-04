@@ -1,6 +1,15 @@
 import * as jwt from 'jsonwebtoken';
 import PDFDocument from 'pdfkit';
 
+import {
+  DEFAULT_INVOICE_DOCUMENT_TEMPLATE,
+  mergeInvoiceDocumentTemplate,
+  parseTaxBreakdownLines,
+  type InvoiceDocumentTemplate,
+  type ProfilePdfSlice,
+  profileSliceForPdf,
+} from './invoice-document-template';
+
 export type InvoicePdfLocale = 'en' | 'es';
 
 export type InvoicePdfLineItem = {
@@ -8,6 +17,12 @@ export type InvoicePdfLineItem = {
   quantity?: number;
   unitAmount?: number;
   lineTotal?: number;
+};
+
+export type InvoicePdfTaxLine = {
+  label: string;
+  amountCents?: number | null;
+  ratePercent?: number | null;
 };
 
 export type InvoicePdfInput = {
@@ -21,8 +36,15 @@ export type InvoicePdfInput = {
   projectName: string;
   clientName: string;
   clientEmail?: string | null;
+  clientTaxId?: string | null;
   lineItems: InvoicePdfLineItem[];
   payments: Array<{ amountMajor: number; createdAt: Date; note: string | null }>;
+  issuerName?: string | null;
+  issuerAddress?: string | null;
+  issuerTaxId?: string | null;
+  footerText?: string | null;
+  documentTemplate?: InvoiceDocumentTemplate;
+  taxBreakdownLines?: InvoicePdfTaxLine[];
 };
 
 export const INVOICE_PDF_DOWNLOAD_PURPOSE = 'invoice_pdf' as const;
@@ -41,6 +63,7 @@ export const LABELS: Record<
     invoiceNo: string;
     date: string;
     due: string;
+    from: string;
     client: string;
     project: string;
     status: string;
@@ -56,6 +79,7 @@ export const LABELS: Record<
     invoiceNo: 'Invoice no.',
     date: 'Issue date',
     due: 'Due date',
+    from: 'From',
     client: 'Bill to',
     project: 'Project',
     status: 'Status',
@@ -70,6 +94,7 @@ export const LABELS: Record<
     invoiceNo: 'Nº factura',
     date: 'Fecha',
     due: 'Vencimiento',
+    from: 'Emisor',
     client: 'Cliente',
     project: 'Proyecto',
     status: 'Estado',
@@ -92,6 +117,10 @@ function fmtMoney(major: number, currency: string): string {
   } catch {
     return `${major.toFixed(2)} ${currency}`;
   }
+}
+
+function fmtMoneyCents(cents: number, currency: string): string {
+  return fmtMoney(cents / 100, currency);
 }
 
 function fmtDate(d: Date | null, locale: InvoicePdfLocale): string {
@@ -145,6 +174,8 @@ export function buildInvoicePdfBuffer(
   locale: InvoicePdfLocale = 'en',
 ): Promise<Buffer> {
   const L = LABELS[locale];
+  const tmpl = input.documentTemplate ?? DEFAULT_INVOICE_DOCUMENT_TEMPLATE;
+  const taxLines = input.taxBreakdownLines ?? [];
 
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -161,8 +192,33 @@ export function buildInvoicePdfBuffer(
     doc.text(`${L.date}: ${fmtDate(input.issuedAt, locale)}`);
     doc.text(`${L.due}: ${fmtDate(input.dueDate, locale)}`);
     doc.moveDown();
+
+    const fromLines: string[] = [];
+    const name = input.issuerName?.trim();
+    if (name) fromLines.push(name);
+    if (tmpl.showIssuerAddress) {
+      const addr = input.issuerAddress?.trim();
+      if (addr) fromLines.push(addr);
+    }
+    if (tmpl.showIssuerTaxId) {
+      const tid = input.issuerTaxId?.trim();
+      if (tid) fromLines.push(`${tmpl.labels.issuerTaxId}: ${tid}`);
+    }
+    if (fromLines.length > 0) {
+      doc.fillColor('#000000').fontSize(11).text(L.from, { underline: false });
+      doc.fontSize(10).fillColor('#333333');
+      for (const line of fromLines) doc.text(line, { width: 500 });
+      doc.moveDown(0.5);
+    }
+
     doc.fillColor('#000000').fontSize(11).text(`${L.client}: ${input.clientName}`);
     if (input.clientEmail) doc.fontSize(10).fillColor('#555555').text(input.clientEmail);
+    if (tmpl.showClientTaxId) {
+      const ct = input.clientTaxId?.trim();
+      if (ct) {
+        doc.fontSize(10).fillColor('#333333').text(`${tmpl.labels.clientTaxId}: ${ct}`);
+      }
+    }
     doc.fillColor('#000000').fontSize(11).text(`${L.project}: ${input.projectName}`);
     doc.text(`${L.status}: ${input.status}`);
     doc.moveDown();
@@ -185,6 +241,24 @@ export function buildInvoicePdfBuffer(
       doc.moveDown();
     }
 
+    if (tmpl.showTaxBreakdown && taxLines.length > 0) {
+      doc.fontSize(12).fillColor('#111111').text(tmpl.labels.taxBreakdown);
+      doc.moveDown(0.25);
+      doc.fontSize(9).fillColor('#333333');
+      for (const t of taxLines) {
+        const rate =
+          t.ratePercent != null && Number.isFinite(t.ratePercent)
+            ? ` (${t.ratePercent}%)`
+            : '';
+        const amt =
+          t.amountCents != null && Number.isFinite(t.amountCents)
+            ? ` — ${fmtMoneyCents(t.amountCents, input.currency)}`
+            : '';
+        doc.text(`${t.label}${rate}${amt}`, { width: 500 });
+      }
+      doc.moveDown();
+    }
+
     if (input.payments.length > 0) {
       doc.fontSize(12).fillColor('#111111').text(L.payments);
       doc.moveDown(0.25);
@@ -198,9 +272,15 @@ export function buildInvoicePdfBuffer(
       doc.moveDown();
     }
 
-    if (input.memo?.trim()) {
-      doc.fontSize(11).fillColor('#111111').text(L.memo);
+    if (tmpl.showInvoiceNotes && input.memo?.trim()) {
+      doc.fontSize(11).fillColor('#111111').text(tmpl.labels.invoiceNotes);
       doc.fontSize(9).fillColor('#444444').text(input.memo.trim(), { width: 500 });
+      doc.moveDown();
+    }
+
+    if (tmpl.showLegalFooter && input.footerText?.trim()) {
+      doc.fontSize(10).fillColor('#444444').text(tmpl.labels.legalFooter, { underline: false });
+      doc.fontSize(8).fillColor('#666666').text(input.footerText.trim(), { width: 500 });
     }
 
     doc.fontSize(8).fillColor('#888888').text(`${L.page} 1`, 48, doc.page.height - 60, {
@@ -242,19 +322,29 @@ export function verifyInvoicePdfDownloadToken(
   };
 }
 
-/** Map Prisma invoice row (with project.client + payments) to PDF input. */
-export function mapFreelanceInvoiceRowToPdfInput(inv: {
-  invoiceNumber: string | null;
-  currency: string;
-  amount: unknown;
-  status: string;
-  createdAt: Date;
-  dueDate: Date | null;
-  memo: string | null;
-  lineItems: unknown;
-  project: { name: string; client: { name: string; email: string | null } };
-  payments: Array<{ amount: unknown; createdAt: Date; note: string | null }>;
-}): InvoicePdfInput {
+/** Map Prisma invoice row + optional profile to PDF input. */
+export function mapFreelanceInvoiceRowToPdfInput(
+  inv: {
+    invoiceNumber: string | null;
+    currency: string;
+    amount: unknown;
+    status: string;
+    createdAt: Date;
+    dueDate: Date | null;
+    memo: string | null;
+    lineItems: unknown;
+    taxBreakdown?: unknown | null;
+    project: {
+      name: string;
+      client: { name: string; email: string | null; taxId?: string | null };
+    };
+    payments: Array<{ amount: unknown; createdAt: Date; note: string | null }>;
+  },
+  profile: ProfilePdfSlice | null,
+): InvoicePdfInput {
+  const pdfProfile = profile ? profileSliceForPdf(profile) : null;
+  const tmpl = pdfProfile?.template ?? mergeInvoiceDocumentTemplate(null);
+
   return {
     invoiceNumber: inv.invoiceNumber,
     currency: inv.currency || 'EUR',
@@ -266,11 +356,18 @@ export function mapFreelanceInvoiceRowToPdfInput(inv: {
     projectName: inv.project.name,
     clientName: inv.project.client.name,
     clientEmail: inv.project.client.email,
+    clientTaxId: inv.project.client.taxId ?? null,
     lineItems: parseInvoiceLineItems(inv.lineItems),
     payments: inv.payments.map((p) => ({
       amountMajor: Number(p.amount),
       createdAt: p.createdAt,
       note: p.note,
     })),
+    issuerName: pdfProfile?.issuerName ?? null,
+    issuerAddress: pdfProfile?.issuerAddress ?? null,
+    issuerTaxId: pdfProfile?.issuerTaxId ?? null,
+    footerText: pdfProfile?.footerText ?? null,
+    documentTemplate: tmpl,
+    taxBreakdownLines: parseTaxBreakdownLines(inv.taxBreakdown ?? null),
   };
 }

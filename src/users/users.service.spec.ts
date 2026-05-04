@@ -37,6 +37,9 @@ describe('UsersService', () => {
       invoiceBrandAddress: 'Madrid, ES',
       invoiceBrandAccentHex: '#6366f1',
       invoiceBrandFooter: 'Thank you.',
+      invoiceIssuerTaxId: null,
+      invoiceDocumentTemplate: null,
+      invoiceNumbering: null,
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
     });
     const svc = new UsersService(prisma);
@@ -57,6 +60,10 @@ describe('UsersService', () => {
       invoiceBrandAddress: 'Madrid, ES',
       invoiceBrandAccentHex: '#6366f1',
       invoiceBrandFooter: 'Thank you.',
+      invoiceIssuerTaxId: null,
+      invoiceDocumentTemplate: expect.any(Object),
+      invoiceNumbering: expect.any(Object),
+      invoiceNumberPreview: '1',
     });
   });
 });

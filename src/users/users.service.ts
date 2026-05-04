@@ -8,6 +8,12 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import type { PatchProfileDto } from './dto/patch-profile.dto';
 import { SubscriptionTier } from '../webhooks/revenuecat.dto';
+import { mergeInvoiceDocumentTemplate } from '../freelance/invoice-document-template';
+import {
+  assertInvoiceNumberingStateValid,
+  normalizeInvoiceNumberingRaw,
+  peekNextInvoiceNumber,
+} from '../freelance/invoice-numbering';
 
 @Injectable()
 export class UsersService {
@@ -40,6 +46,10 @@ export class UsersService {
         invoiceBrandAddress: profile.invoiceBrandAddress,
         invoiceBrandAccentHex: profile.invoiceBrandAccentHex,
         invoiceBrandFooter: profile.invoiceBrandFooter,
+        invoiceIssuerTaxId: profile.invoiceIssuerTaxId,
+        invoiceDocumentTemplate: mergeInvoiceDocumentTemplate(profile.invoiceDocumentTemplate),
+        invoiceNumbering: normalizeInvoiceNumberingRaw(profile.invoiceNumbering),
+        invoiceNumberPreview: peekNextInvoiceNumber(profile.invoiceNumbering, new Date()),
         createdAt: profile.createdAt,
       },
     };
@@ -70,6 +80,24 @@ export class UsersService {
     if (dto.invoiceBrandFooter !== undefined) {
       const v = dto.invoiceBrandFooter.trim();
       data.invoiceBrandFooter = v.length ? v : null;
+    }
+    if (dto.invoiceIssuerTaxId !== undefined) {
+      const v = dto.invoiceIssuerTaxId.trim();
+      data.invoiceIssuerTaxId = v.length ? v : null;
+    }
+    if (dto.invoiceDocumentTemplate !== undefined) {
+      data.invoiceDocumentTemplate = mergeInvoiceDocumentTemplate(
+        dto.invoiceDocumentTemplate,
+      ) as object;
+    }
+    if (dto.invoiceNumbering !== undefined) {
+      const norm = normalizeInvoiceNumberingRaw(dto.invoiceNumbering);
+      try {
+        assertInvoiceNumberingStateValid(norm);
+      } catch {
+        throw new BadRequestException({ code: 'INVALID_INVOICE_NUMBERING' });
+      }
+      data.invoiceNumbering = norm as object;
     }
     if (dto.invoiceBrandAccentHex !== undefined) {
       const h = dto.invoiceBrandAccentHex.trim();

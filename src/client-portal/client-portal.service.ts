@@ -473,8 +473,19 @@ export class ClientPortalService {
       throw new NotFoundException('Invoice not found');
     }
 
+    const profile = await this.prisma.profile.findUnique({
+      where: { id: payload.freelancerId },
+      select: {
+        invoiceBrandName: true,
+        invoiceBrandAddress: true,
+        invoiceBrandFooter: true,
+        invoiceIssuerTaxId: true,
+        invoiceDocumentTemplate: true,
+      },
+    });
+
     const locale = normalizeInvoicePdfLocale(localeRaw);
-    const input = mapFreelanceInvoiceRowToPdfInput(inv);
+    const input = mapFreelanceInvoiceRowToPdfInput(inv, profile);
     return buildInvoicePdfBuffer(input, locale);
   }
 

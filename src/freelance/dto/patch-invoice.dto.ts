@@ -1,4 +1,4 @@
-import { IsDateString, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsDateString, IsIn, IsObject, IsOptional, IsString, MaxLength, Allow } from 'class-validator';
 
 const INVOICE_STATUSES = ['draft', 'sent', 'viewed', 'paid'] as const;
 
@@ -24,4 +24,9 @@ export class PatchInvoiceDto {
   @IsOptional()
   @IsObject()
   lineItems?: Record<string, unknown> | null;
+
+  /** Optional tax lines [{ label, amountCents?, ratePercent? }]. User-defined; not tax advice. */
+  @IsOptional()
+  @Allow()
+  taxBreakdown?: unknown | null;
 }

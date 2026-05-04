@@ -42,6 +42,13 @@ model Profile {
   invoiceBrandAccentHex  String  @default("#6366f1") @map("invoice_brand_accent_hex") @db.VarChar(7)
   invoiceBrandFooter     String? @map("invoice_brand_footer") @db.Text
 
+  /// Issuer tax id (VAT / NIF / etc.); user is responsible for accuracy.
+  invoiceIssuerTaxId     String? @map("invoice_issuer_tax_id") @db.VarChar(64)
+  /// JSON: visibility toggles + custom labels for invoice PDF/HTML blocks.
+  invoiceDocumentTemplate Json?   @map("invoice_document_template")
+  /// JSON: manual/auto numbering, prefix, padding, yearly reset, nextSequence, etc.
+  invoiceNumbering       Json?    @map("invoice_numbering")
+
   /// Stripe Connect Express account (acct_…); Checkout uses platform key + stripeAccount option.
   stripeConnectAccountId         String? @map("stripe_connect_account_id") @db.VarChar(32)
   stripeConnectChargesEnabled    Boolean @default(false) @map("stripe_connect_charges_enabled")
@@ -168,6 +175,8 @@ model FreelanceInvoice {
   dueDate   DateTime? @map("due_date") @db.Timestamptz(6)
   invoiceNumber String? @map("invoice_number") @db.VarChar(64)
   lineItems Json?    @map("line_items")
+  /// Optional tax lines [{ "label", "amountCents?", "ratePercent?" }]; user-defined.
+  taxBreakdown Json? @map("tax_breakdown")
   lastEmailedAt DateTime? @map("last_emailed_at") @db.Timestamptz(6)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)

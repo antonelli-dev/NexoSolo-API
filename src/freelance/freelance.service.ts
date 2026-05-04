@@ -25,6 +25,8 @@ import {
   signInvoicePdfDownloadToken,
 } from './invoice-pdf';
 import { buildQuotePdfBuffer, type QuotePdfInput } from './quote-pdf';
+import { consumeNextInvoiceNumber } from './invoice-numbering';
+import type { ProfilePdfSlice } from './invoice-document-template';
 
 const INVOICE_PENDING = ['sent', 'viewed'] as const;
 
@@ -182,22 +184,34 @@ export class FreelanceService {
     });
     if (!project) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
 
-    const lastInvoice = await this.prisma.freelanceInvoice.findFirst({
-      where: { project: { userId } },
-      orderBy: { invoiceNumber: 'desc' },
-    });
-    const nextNumber = lastInvoice ? (parseInt(lastInvoice.invoiceNumber || '0') + 1).toString() : '1';
+    const issueDate = new Date();
 
-    return this.prisma.freelanceInvoice.create({
-      data: {
-        invoiceNumber: nextNumber,
-        amount: dto.amountCents / 100,
-        currency: dto.currency || 'EUR',
-        status: 'draft',
-        projectId: dto.projectId,
-        memo: dto.title,
-      } as any,
-      include: { project: { include: { client: true } }, payments: true },
+    return this.prisma.$transaction(async (tx) => {
+      const profile = await tx.profile.findUnique({ where: { id: userId } });
+      const numberingJson = profile?.invoiceNumbering ?? null;
+      const auto = consumeNextInvoiceNumber(numberingJson, issueDate);
+      const invoiceNumber = auto?.invoiceNumber ?? null;
+
+      if (auto) {
+        await tx.profile.update({
+          where: { id: userId },
+          data: { invoiceNumbering: auto.updatedState as object },
+        });
+      }
+
+      const inv = await tx.freelanceInvoice.create({
+        data: {
+          invoiceNumber,
+          amount: dto.amountCents / 100,
+          currency: dto.currency || 'EUR',
+          status: 'draft',
+          projectId: dto.projectId,
+          memo: dto.title,
+        } as any,
+        include: { project: { include: { client: true } }, payments: true },
+      });
+
+      return inv;
     });
   }
 
@@ -206,9 +220,23 @@ export class FreelanceService {
       where: { id, project: { userId } },
     });
     if (!inv) throw new NotFoundException({ code: 'INVOICE_NOT_FOUND' });
+
+    const data: Record<string, unknown> = {};
+    if (dto.status !== undefined) data.status = dto.status;
+    if (dto.memo !== undefined) data.memo = dto.memo;
+    if (dto.dueDate !== undefined) {
+      data.dueDate = dto.dueDate === null ? null : new Date(dto.dueDate);
+    }
+    if (dto.invoiceNumber !== undefined) data.invoiceNumber = dto.invoiceNumber;
+    if (dto.lineItems !== undefined) data.lineItems = dto.lineItems;
+    if (dto.taxBreakdown !== undefined) {
+      if (dto.taxBreakdown === null) data.taxBreakdown = null;
+      else if (Array.isArray(dto.taxBreakdown)) data.taxBreakdown = dto.taxBreakdown;
+    }
+
     return this.prisma.freelanceInvoice.update({
       where: { id },
-      data: dto as any,
+      data: data as any,
       include: { project: { include: { client: true } }, payments: true },
     });
   }
@@ -224,9 +252,25 @@ export class FreelanceService {
     });
     if (!inv) throw new NotFoundException({ code: 'INVOICE_NOT_FOUND' });
 
+    const profile = await this.selectProfilePdfSlice(inv.project.userId);
+
     const locale = normalizeInvoicePdfLocale(localeRaw);
-    const input = mapFreelanceInvoiceRowToPdfInput(inv);
+    const input = mapFreelanceInvoiceRowToPdfInput(inv, profile);
     return buildInvoicePdfBuffer(input, locale);
+  }
+
+  private async selectProfilePdfSlice(userId: string): Promise<ProfilePdfSlice | null> {
+    const p = await this.prisma.profile.findUnique({
+      where: { id: userId },
+      select: {
+        invoiceBrandName: true,
+        invoiceBrandAddress: true,
+        invoiceBrandFooter: true,
+        invoiceIssuerTaxId: true,
+        invoiceDocumentTemplate: true,
+      },
+    });
+    return p;
   }
 
   async sendInvoiceEmail(userId: string, invoiceId: string, dto: SendInvoiceEmailDto) {
@@ -258,7 +302,8 @@ export class FreelanceService {
     }
 
     const locale = normalizeInvoicePdfLocale(dto.locale);
-    const pdfInput = mapFreelanceInvoiceRowToPdfInput(inv);
+    const profile = await this.selectProfilePdfSlice(inv.project.userId);
+    const pdfInput = mapFreelanceInvoiceRowToPdfInput(inv, profile);
     const pdfBuffer = await buildInvoicePdfBuffer(pdfInput, locale);
     const pdfBase64 = pdfBuffer.toString('base64');
     const fileName = `invoice-${(inv.invoiceNumber ?? inv.id.slice(0, 8)).replace(/[^\w.-]+/g, '_')}.pdf`;
@@ -457,43 +502,49 @@ ${downloadUrlHtml}
     });
     if (!quote) throw new NotFoundException({ code: 'QUOTE_NOT_FOUND' });
 
-    const project = await this.prisma.freelanceProject.create({
-      data: {
-        userId,
-        clientId: quote.clientId,
-        name: quote.title.slice(0, 200) || 'Project',
-        status: 'active',
-        description: quote.scopeNotes ?? undefined,
-      } as any,
-      include: { client: true },
-    });
+    const issueDate = new Date();
 
-    const lastInvoice = await this.prisma.freelanceInvoice.findFirst({
-      where: { project: { userId } },
-      orderBy: { invoiceNumber: 'desc' },
-    });
-    const nextNumber = lastInvoice
-      ? (parseInt(lastInvoice.invoiceNumber || '0', 10) + 1).toString()
-      : '1';
+    return this.prisma.$transaction(async (tx) => {
+      const project = await tx.freelanceProject.create({
+        data: {
+          userId,
+          clientId: quote.clientId,
+          name: quote.title.slice(0, 200) || 'Project',
+          status: 'active',
+          description: quote.scopeNotes ?? undefined,
+        } as any,
+        include: { client: true },
+      });
 
-    const invoice = await this.prisma.freelanceInvoice.create({
-      data: {
-        projectId: project.id,
-        amount: Number(quote.amount),
-        currency: quote.currency,
-        status: 'draft',
-        invoiceNumber: nextNumber,
-        memo: `Converted from quote ${quote.id.slice(0, 8)}`,
-      } as any,
-      include: { project: { include: { client: true } }, payments: true },
-    });
+      const profile = await tx.profile.findUnique({ where: { id: userId } });
+      const auto = consumeNextInvoiceNumber(profile?.invoiceNumbering ?? null, issueDate);
+      const invoiceNumber = auto?.invoiceNumber ?? null;
+      if (auto) {
+        await tx.profile.update({
+          where: { id: userId },
+          data: { invoiceNumbering: auto.updatedState as object },
+        });
+      }
 
-    await this.prisma.quote.update({
-      where: { id: quoteId },
-      data: { status: 'accepted' } as any,
-    });
+      const invoice = await tx.freelanceInvoice.create({
+        data: {
+          projectId: project.id,
+          amount: Number(quote.amount),
+          currency: quote.currency,
+          status: 'draft',
+          invoiceNumber,
+          memo: `Converted from quote ${quote.id.slice(0, 8)}`,
+        } as any,
+        include: { project: { include: { client: true } }, payments: true },
+      });
 
-    return { ok: true as const, projectId: project.id, invoice };
+      await tx.quote.update({
+        where: { id: quoteId },
+        data: { status: 'accepted' } as any,
+      });
+
+      return { ok: true as const, projectId: project.id, invoice };
+    });
   }
 
   async quotePdfBuffer(userId: string, quoteId: string, localeRaw?: string): Promise<Buffer> {

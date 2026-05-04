@@ -1,4 +1,11 @@
-import { IsOptional, IsString, IsUrl, Matches, MaxLength } from 'class-validator';
+import {
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUrl,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 
 export class PatchProfileDto {
   @IsOptional()
@@ -25,4 +32,20 @@ export class PatchProfileDto {
   @IsString()
   @MaxLength(4000)
   invoiceBrandFooter?: string;
+
+  /** Issuer VAT / tax id; user is responsible for accuracy. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  invoiceIssuerTaxId?: string;
+
+  /** Invoice PDF block visibility + custom labels (JSON object). */
+  @IsOptional()
+  @IsObject()
+  invoiceDocumentTemplate?: Record<string, unknown>;
+
+  /** Numbering: mode, prefix, suffix, padLength, nextSequence, etc. (JSON object). */
+  @IsOptional()
+  @IsObject()
+  invoiceNumbering?: Record<string, unknown>;
 }
