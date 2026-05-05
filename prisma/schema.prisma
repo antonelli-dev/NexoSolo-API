@@ -154,6 +154,7 @@ model FreelanceProject {
   client      FreelanceClient    @relation(fields: [clientId], references: [id], onDelete: Cascade)
   invoices    FreelanceInvoice[]
   deliveries  ProjectDelivery[]
+  tasks       ProjectTask[]
 
   @@index([userId])
   @@index([clientId])
@@ -264,6 +265,24 @@ model ClientActivity {
   @@index([clientId])
   @@index([userId, clientId])
   @@map("client_activities")
+}
+
+/// Lightweight checklist items for a freelancer project (app “mini‑Trello”).
+model ProjectTask {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String    @map("project_id") @db.Uuid
+  title     String    @db.VarChar(500)
+  done      Boolean   @default(false)
+  sortOrder Int       @default(0) @map("sort_order")
+  dueAt     DateTime? @map("due_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  project FreelanceProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([projectId, sortOrder])
+  @@map("project_tasks")
 }
 
 model ProjectDelivery {

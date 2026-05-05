@@ -20,6 +20,7 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CreateClientDto } from './dto/create-client.dto';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
+import { CreateProjectTaskDto } from './dto/create-project-task.dto';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { CreateQuickInvoiceDto } from './dto/create-quick-invoice.dto';
@@ -27,6 +28,7 @@ import { CreateQuoteDto } from './dto/create-quote.dto';
 import { PatchClientDto } from './dto/patch-client.dto';
 import { PatchInvoiceDto } from './dto/patch-invoice.dto';
 import { PatchProjectDto } from './dto/patch-project.dto';
+import { PatchProjectTaskDto } from './dto/patch-project-task.dto';
 import { PatchQuoteDto } from './dto/patch-quote.dto';
 import { SendInvoiceEmailDto } from './dto/send-invoice-email.dto';
 import { FreelanceService } from './freelance.service';
@@ -224,6 +226,34 @@ export class FreelanceController {
     @Body() dto: CreateDeliveryDto,
   ) {
     return this.freelance.createDelivery(req.user.sub, id, dto);
+  }
+
+  @Post('projects/:id/tasks')
+  createProjectTask(
+    @Req() req: Authed,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateProjectTaskDto,
+  ) {
+    return this.freelance.createProjectTask(req.user.sub, id, dto);
+  }
+
+  @Patch('projects/:id/tasks/:taskId')
+  patchProjectTask(
+    @Req() req: Authed,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string,
+    @Body() dto: PatchProjectTaskDto,
+  ) {
+    return this.freelance.patchProjectTask(req.user.sub, id, taskId, dto);
+  }
+
+  @Delete('projects/:id/tasks/:taskId')
+  deleteProjectTask(
+    @Req() req: Authed,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string,
+  ) {
+    return this.freelance.deleteProjectTask(req.user.sub, id, taskId);
   }
 
   // Finance endpoints

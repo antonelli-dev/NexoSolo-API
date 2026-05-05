@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateClientDto } from './dto/create-client.dto';
 import type { CreateDeliveryDto } from './dto/create-delivery.dto';
+import type { CreateProjectTaskDto } from './dto/create-project-task.dto';
 import type { CreatePaymentDto } from './dto/create-payment.dto';
 import type { CreateProjectDto } from './dto/create-project.dto';
 import type { CreateQuickInvoiceDto } from './dto/create-quick-invoice.dto';
@@ -16,6 +17,7 @@ import type { CreateQuoteDto } from './dto/create-quote.dto';
 import type { PatchClientDto } from './dto/patch-client.dto';
 import type { PatchInvoiceDto } from './dto/patch-invoice.dto';
 import type { PatchProjectDto } from './dto/patch-project.dto';
+import type { PatchProjectTaskDto } from './dto/patch-project-task.dto';
 import type { PatchQuoteDto } from './dto/patch-quote.dto';
 import type { SendInvoiceEmailDto } from './dto/send-invoice-email.dto';
 import {
@@ -26,8 +28,22 @@ import {
 } from './invoice-pdf';
 import { buildQuotePdfBuffer, type QuotePdfInput } from './quote-pdf';
 import { consumeNextInvoiceNumber, type ProfilePdfSlice } from '@rizzup/invoice-settings';
+import type {
+  FreelanceClient,
+  FreelanceInvoice,
+  FreelanceProject,
+  ProjectDelivery,
+  ProjectTask,
+} from '@prisma/client';
 
 const INVOICE_PENDING = ['sent', 'viewed'] as const;
+
+type ProjectDetailInclude = FreelanceProject & {
+  client: FreelanceClient;
+  invoices: FreelanceInvoice[];
+  deliveries: ProjectDelivery[];
+  tasks: ProjectTask[];
+};
 
 @Injectable()
 export class FreelanceService {
@@ -142,10 +158,15 @@ export class FreelanceService {
   async getProject(userId: string, id: string) {
     const p = await this.prisma.freelanceProject.findFirst({
       where: { id, userId },
-      include: { client: true },
+      include: {
+        client: true,
+        invoices: { orderBy: { createdAt: 'desc' } },
+        deliveries: { orderBy: { createdAt: 'desc' } },
+        tasks: { orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
+      },
     });
     if (!p) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
-    return p;
+    return this.serializeProjectDetail(p);
   }
 
   async patchProject(userId: string, id: string, dto: PatchProjectDto) {
@@ -166,6 +187,64 @@ export class FreelanceService {
     });
     if (!p) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
     return this.prisma.freelanceProject.delete({ where: { id } });
+  }
+
+  async createProjectTask(userId: string, projectId: string, dto: CreateProjectTaskDto) {
+    await this.requireOwnedProject(projectId, userId);
+
+    const agg = await this.prisma.projectTask.aggregate({
+      where: { projectId },
+      _max: { sortOrder: true },
+    });
+    const sortOrder = dto.sortOrder ?? (agg._max.sortOrder ?? -1) + 1;
+
+    const row = await this.prisma.projectTask.create({
+      data: {
+        projectId,
+        title: dto.title.trim(),
+        sortOrder,
+        dueAt: dto.dueAt ? new Date(dto.dueAt) : undefined,
+      },
+    });
+    return this.serializeProjectTask(row);
+  }
+
+  async patchProjectTask(
+    userId: string,
+    projectId: string,
+    taskId: string,
+    dto: PatchProjectTaskDto,
+  ) {
+    await this.requireOwnedProject(projectId, userId);
+    const existing = await this.prisma.projectTask.findFirst({
+      where: { id: taskId, projectId },
+    });
+    if (!existing) throw new NotFoundException({ code: 'PROJECT_TASK_NOT_FOUND' });
+
+    const data: Record<string, unknown> = {};
+    if (dto.title !== undefined) data.title = dto.title.trim();
+    if (dto.done !== undefined) data.done = dto.done;
+    if (dto.sortOrder !== undefined) data.sortOrder = dto.sortOrder;
+    if (dto.dueAt !== undefined) {
+      data.dueAt = dto.dueAt === null ? null : new Date(dto.dueAt);
+    }
+
+    const row = await this.prisma.projectTask.update({
+      where: { id: taskId },
+      data: data as any,
+    });
+    return this.serializeProjectTask(row);
+  }
+
+  async deleteProjectTask(userId: string, projectId: string, taskId: string) {
+    await this.requireOwnedProject(projectId, userId);
+    const existing = await this.prisma.projectTask.findFirst({
+      where: { id: taskId, projectId },
+    });
+    if (!existing) throw new NotFoundException({ code: 'PROJECT_TASK_NOT_FOUND' });
+
+    await this.prisma.projectTask.delete({ where: { id: taskId } });
+    return { ok: true as const };
   }
 
   async listInvoices(userId: string) {
@@ -781,22 +860,35 @@ ${downloadUrlHtml}
   async duplicateProject(userId: string, projectId: string) {
     const project = await this.prisma.freelanceProject.findFirst({
       where: { id: projectId, userId },
-      include: { client: true },
+      include: { client: true, tasks: true },
     });
     if (!project) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
 
-    const newProject = await this.prisma.freelanceProject.create({
-      data: {
-        userId,
-        clientId: project.clientId,
-        name: `${project.name} (Copy)`,
-        status: 'proposed',
-        description: project.description,
-        value: project.value,
-      },
+    return await this.prisma.$transaction(async (tx) => {
+      const np = await tx.freelanceProject.create({
+        data: {
+          userId,
+          clientId: project.clientId,
+          name: `${project.name} (Copy)`,
+          status: 'proposed',
+          description: project.description,
+          value: project.value,
+          deadline: project.deadline,
+        },
+      });
+      if (project.tasks.length) {
+        await tx.projectTask.createMany({
+          data: project.tasks.map(t => ({
+            projectId: np.id,
+            title: t.title,
+            sortOrder: t.sortOrder,
+            dueAt: t.dueAt,
+            done: false,
+          })),
+        });
+      }
+      return np;
     });
-
-    return newProject;
   }
 
   // Client Activities
@@ -1013,5 +1105,65 @@ ${downloadUrlHtml}
     ]);
 
     return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  }
+
+  private async requireOwnedProject(projectId: string, userId: string): Promise<void> {
+    const p = await this.prisma.freelanceProject.findFirst({
+      where: { id: projectId, userId },
+      select: { id: true },
+    });
+    if (!p) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
+  }
+
+  private serializeProjectDetail(p: ProjectDetailInclude) {
+    const invoiceCurrencies = new Set(p.invoices.map(inv => inv.currency));
+    const mixedCurrency = invoiceCurrencies.size > 1;
+    const primaryCurrency = p.invoices[0]?.currency ?? 'EUR';
+
+    const valueMajor = p.value != null ? Number(p.value) : null;
+    const paidMajor = p.paidAmount != null ? Number(p.paidAmount) : null;
+
+    return {
+      id: p.id,
+      name: p.name,
+      status: p.status,
+      deadline: p.deadline ? p.deadline.toISOString() : null,
+      value: valueMajor,
+      paidAmount: paidMajor,
+      currency: primaryCurrency,
+      mixedCurrency,
+      storedValue: valueMajor,
+      storedPaidAmount: paidMajor,
+      description: p.description ?? null,
+      acceptedScopeAt: p.acceptedScopeAt ? p.acceptedScopeAt.toISOString() : null,
+      createdAt: p.createdAt.toISOString(),
+      client: { id: p.client.id, name: p.client.name },
+      invoices: p.invoices.map(inv => ({
+        id: inv.id,
+        amountCents: Math.round(Number(inv.amount) * 100),
+        currency: inv.currency,
+        status: inv.status,
+        dueDate: inv.dueDate ? inv.dueDate.toISOString() : null,
+      })),
+      deliveries: p.deliveries.map(del => ({
+        id: del.id,
+        version: del.version,
+        label: del.label,
+        notes: del.notes,
+        createdAt: del.createdAt.toISOString(),
+      })),
+      tasks: p.tasks.map(t => this.serializeProjectTask(t)),
+    };
+  }
+
+  private serializeProjectTask(t: ProjectTask) {
+    return {
+      id: t.id,
+      title: t.title,
+      done: t.done,
+      sortOrder: t.sortOrder,
+      dueAt: t.dueAt ? t.dueAt.toISOString() : null,
+      createdAt: t.createdAt.toISOString(),
+    };
   }
 }
